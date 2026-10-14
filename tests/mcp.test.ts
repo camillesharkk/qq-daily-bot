@@ -6,7 +6,7 @@ import { GET as server } from "@/app/.well-known/oauth-authorization-server/rout
 import { POST as token } from "@/app/oauth/token/route";
 import { readReadyReport } from "@/lib/daily-store";
 import { useQueryForTests } from "@/lib/db";
-import { authorizationCode, PUBLIC_ORIGIN } from "@/lib/oauth";
+import { authorizationCode, MCP_RESOURCE, PUBLIC_ORIGIN, verifyAccessToken } from "@/lib/oauth";
 import { clearAccessTokenCache } from "@/lib/qq/token";
 import { createMemoryQuery } from "./memory-db";
 
@@ -46,6 +46,7 @@ describe("chatgpt mcp", () => {
       clientId: "https://chatgpt.com/oauth/client.json",
       redirectUri: "https://chatgpt.com/connector_platform_oauth_redirect",
       challenge: createHash("sha256").update(verifier).digest("base64url"),
+      resource: PUBLIC_ORIGIN,
     });
     const response = await token(new Request("https://bot.arizonanotaryprep.com/oauth/token", {
       method: "POST",
@@ -58,8 +59,11 @@ describe("chatgpt mcp", () => {
         resource: PUBLIC_ORIGIN,
       }),
     }));
-    const body = await response.json() as { access_token: string };
-    return body.access_token;
+    const body = await response.json() as { access_token: string; refresh_token: string };
+    const carried = JSON.parse(JSON.stringify({ access: body.access_token })).access as string;
+    expect(verifyAccessToken(`Bearer ${carried}`)).toBe(true);
+    expect(verifyAccessToken(`Bearer ${body.refresh_token}`)).toBe(false);
+    return carried;
   }
 
   function call(name: string, args: Record<string, string>, access = ""): Promise<Response> {
@@ -74,7 +78,7 @@ describe("chatgpt mcp", () => {
     const metadata = await (await server()).json() as { code_challenge_methods_supported: string[] };
     expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
     const resourceBody = await (await resource()).json() as { resource: string };
-    expect(resourceBody.resource).toBe(PUBLIC_ORIGIN);
+    expect(resourceBody.resource).toBe(MCP_RESOURCE);
     const denied = await call("save_daily_report", { date: DATE, content: "原文" });
     expect(denied.status).toBe(401);
     expect(denied.headers.get("www-authenticate")).toContain("oauth-protected-resource");

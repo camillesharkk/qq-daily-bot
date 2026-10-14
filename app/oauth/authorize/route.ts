@@ -1,4 +1,4 @@
-import { authorizationCode, PUBLIC_ORIGIN, redirectAllowed } from "@/lib/oauth";
+import { allowedResource, authorizationCode, PUBLIC_ORIGIN, redirectAllowed } from "@/lib/oauth";
 import { isBearerAuthorized } from "@/lib/auth";
 import { optionalEnv } from "@/lib/env";
 
@@ -38,7 +38,7 @@ export async function POST(request: Request): Promise<Response> {
   if (typeof password !== "string" || !isBearerAuthorized(`Bearer ${password}`, optionalEnv("ADMIN_TOKEN"))) {
     return page(fields, "密钥不正确");
   }
-  if (fields.code_challenge_method !== "S256" || fields.resource !== PUBLIC_ORIGIN) {
+  if (fields.code_challenge_method !== "S256" || !allowedResource(fields.resource)) {
     return new Response("授权参数无效", { status: 400 });
   }
   if (!(await redirectAllowed(fields.client_id, fields.redirect_uri))) {
@@ -48,6 +48,7 @@ export async function POST(request: Request): Promise<Response> {
     clientId: fields.client_id,
     redirectUri: fields.redirect_uri,
     challenge: fields.code_challenge,
+    resource: fields.resource,
   });
   const target = new URL(fields.redirect_uri);
   target.searchParams.set("code", code);
