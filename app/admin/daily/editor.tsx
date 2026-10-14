@@ -9,6 +9,7 @@ type Result = {
   status?: string;
   errCode?: string | null;
   sendState?: string | null;
+  content?: string | null;
   segments?: string[];
   segmentCount?: number;
 };
@@ -20,7 +21,7 @@ export function DailyEditor({ defaultDate }: { defaultDate: string }) {
   const [pending, setPending] = useState("");
   const [result, setResult] = useState<Result | null>(null);
 
-  async function submit(action: "preview" | "save" | "send"): Promise<void> {
+  async function submit(action: "preview" | "save" | "send" | "status"): Promise<void> {
     setPending(action);
     setResult(null);
     try {
@@ -33,7 +34,9 @@ export function DailyEditor({ defaultDate }: { defaultDate: string }) {
         body: JSON.stringify({ action, date, content }),
       });
       const body: unknown = await response.json();
-      setResult(typeof body === "object" && body ? (body as Result) : { error: "invalid response" });
+      const next = typeof body === "object" && body ? (body as Result) : { error: "invalid response" };
+      if (action === "status" && typeof next.content === "string") setContent(next.content);
+      setResult(next);
     } catch {
       setResult({ error: "请求没有完成" });
     } finally {
@@ -67,6 +70,9 @@ export function DailyEditor({ defaultDate }: { defaultDate: string }) {
       <div className="actions">
         <button type="button" disabled={pending !== ""} onClick={() => void submit("preview")}>
           预览将发到 QQ 的内容
+        </button>
+        <button type="button" disabled={pending !== ""} onClick={() => void submit("status")}>
+          查看已保存
         </button>
         <button type="button" disabled={pending !== ""} onClick={() => void submit("save")}>
           保存
