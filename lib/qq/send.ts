@@ -87,6 +87,8 @@ async function deliver(
     logQqFailure(response.status, raw, response.headers);
     throw new Error(`QQ message send failed: HTTP ${response.status}`);
   }
+
+  console.log(JSON.stringify({ event: "qq_send_ok", status: response.status, msg_seq: msgSeq }));
 }
 
 export async function sendGroupText(

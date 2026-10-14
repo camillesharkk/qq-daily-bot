@@ -69,7 +69,7 @@ describe("qq webhook", () => {
     expect(tampered.status).toBe(401);
   });
 
-  it("logs only the group openid after a valid event and does not call QQ for unrelated text", async () => {
+  it("logs the event branch and does not call QQ unless the message asks for a reply", async () => {
     useSecret();
     const logs: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
@@ -91,8 +91,29 @@ describe("qq webhook", () => {
     );
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ op: 12 });
-    expect(logs).toEqual(["GROUP_OPENID_CAPTURED=gid-123"]);
+    expect(logs).toContain("GROUP_OPENID_CAPTURED=gid-123");
+    expect(logs.join("\n")).toContain('"type":"GROUP_ADD_ROBOT"');
+    expect(logs.join("\n")).toContain('"branch":"ignore_event"');
     expect(logs.join("\n")).not.toContain("route-test-secret");
+
+    const ignored = JSON.stringify({
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: { id: "event-msg-ignored", group_openid: "gid-123", content: "今天随便聊聊" },
+    });
+    const ignoredResponse = await POST(
+      new Request("https://example.com/api/qq/webhook", {
+        method: "POST",
+        headers: {
+          "x-signature-ed25519": signUtf8("route-test-secret", `1725442341${ignored}`),
+          "x-signature-timestamp": "1725442341",
+        },
+        body: ignored,
+      }),
+    );
+    expect(ignoredResponse.status).toBe(200);
+    expect(logs.join("\n")).toContain('"branch":"ignore_command"');
+    expect(logs.join("\n")).not.toContain("今天随便聊聊");
   });
 
   it("replies with the event message id and still acks when sending fails", async () => {
@@ -127,5 +148,52 @@ describe("qq webhook", () => {
     expect(bodies[0]?.msg_id).toBe("event-msg-1");
     expect(bodies[0]?.content).toBe("机器人连接成功，已识别当前群聊。");
     expect(JSON.stringify(bodies)).not.toContain("route-test-secret");
+  });
+
+  it("replies to 你好 and waits for the QQ send result", async () => {
+    useSecret();
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("getAppAccessToken")) {
+        return Response.json({ access_token: "test-token", expires_in: 7200 });
+      }
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ id: "sent-1", err_code: 0 }, { status: 200 });
+    }) as typeof fetch;
+
+    const raw = JSON.stringify({
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: { id: "event-msg-hello", group_openid: "gid-123", content: " 你好 " },
+    });
+    const response = await POST(
+      new Request("https://example.com/api/qq/webhook", {
+        method: "POST",
+        headers: {
+          "x-signature-ed25519": signUtf8("route-test-secret", `1725442341${raw}`),
+          "x-signature-timestamp": "1725442341",
+        },
+        body: raw,
+      }),
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ op: 12 });
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.msg_id).toBe("event-msg-hello");
+    expect(bodies[0]?.msg_type).toBe(0);
+    expect(bodies[0]?.content).toBe("你好，已收到你的消息，群消息接收和回复测试成功。");
+    const combined = logs.join("\n");
+    expect(combined).toContain('"type":"GROUP_AT_MESSAGE_CREATE"');
+    expect(combined).toContain('"branch":"reply_hello"');
+    expect(combined).toContain('"result":"sent"');
+    expect(combined).toContain('"event":"qq_send_ok"');
+    expect(combined).toContain('"status":200');
+    expect(combined).not.toContain("test-token");
+    expect(combined).not.toContain("route-test-secret");
   });
 });
