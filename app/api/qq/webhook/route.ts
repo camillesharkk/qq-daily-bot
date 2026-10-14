@@ -1,16 +1,18 @@
+import { beginReply, finishReply } from "@/lib/dedup";
 import { requireEnv } from "@/lib/env";
 import { isRecord } from "@/lib/guard";
-import { safeLogMessage } from "@/lib/redact";
-import { sendGroupText } from "@/lib/qq/send";
+import { answerQuestion } from "@/lib/qa";
+import { QqSendError, sendGroupText } from "@/lib/qq/send";
 import { signValidation, verifyEventSignature } from "@/lib/qq/signature";
+import { safeLogMessage } from "@/lib/redact";
+import { planReply } from "@/lib/reply";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 const GROUP_EVENTS = new Set(["GROUP_AT_MESSAGE_CREATE", "GROUP_ADD_ROBOT", "GROUP_MSG_RECEIVE"]);
-const BIND_REPLY = "机器人连接成功，已识别当前群聊。";
-const HELLO_REPLY = "你好，已收到你的消息，群消息接收和回复测试成功。";
+const DUPLICATE_ERR_CODE = "40054005";
 
 function badRequest(): Response {
   return Response.json({ error: "invalid payload" }, { status: 400 });
@@ -31,15 +33,23 @@ function logWebhook(type: string, branch: string, extra?: Record<string, string 
   console.log(JSON.stringify({ event: "qq_webhook_event", type, branch, ...extra }));
 }
 
-function replyFor(content: string): { branch: "reply_bind" | "reply_hello"; text: string } | null {
-  const text = content.replace(/[\s\u200b\u200c\u200d\ufeff]/g, "");
-  if (text.includes("绑定日报") || text.includes("测试")) {
-    return { branch: "reply_bind", text: BIND_REPLY };
+function messageId(data: Record<string, unknown>): string {
+  if (typeof data.id === "string" && data.id) return data.id;
+  if (typeof data.msg_id === "string") return data.msg_id;
+  return "";
+}
+
+async function runAfterAck(task: () => Promise<void>): Promise<void> {
+  if (process.env.VITEST) {
+    await task();
+    return;
   }
-  if (text.includes("你好")) {
-    return { branch: "reply_hello", text: HELLO_REPLY };
-  }
-  return null;
+  const { after } = await import("next/server");
+  after(() =>
+    task().catch((error: unknown) => {
+      console.error(JSON.stringify({ event: "qq_webhook_failed", message: safeLogMessage(error) }));
+    }),
+  );
 }
 
 async function handleGroupEvent(payload: Record<string, unknown>): Promise<void> {
@@ -58,40 +68,44 @@ async function handleGroupEvent(payload: Record<string, unknown>): Promise<void>
     return;
   }
 
-  const content = typeof data.content === "string" ? data.content : "";
-  const reply = replyFor(content);
-  if (!reply) {
-    logWebhook(type, "ignore_command");
+  const msgId = messageId(data);
+  if (!groupOpenId || !msgId) {
+    logWebhook(type, "missing_target");
+    return;
+  }
+  if (!beginReply(msgId)) {
+    logWebhook(type, "duplicate", { result: "skipped" });
     return;
   }
 
-  const msgId =
-    typeof data.id === "string" && data.id
-      ? data.id
-      : typeof data.msg_id === "string"
-        ? data.msg_id
-        : "";
-  if (!groupOpenId || !msgId) {
-    logWebhook(type, "missing_target");
-    console.error(
-      JSON.stringify({ event: "qq_webhook_reply_skipped", type, branch: reply.branch, reason: "missing group_openid or message id" }),
-    );
-    return;
+  const content = typeof data.content === "string" ? data.content : "";
+  const plan = planReply(content);
+  let text = plan.branch === "reply_qa" ? "" : plan.text;
+  let model: "skipped" | "unconfigured" | "ok" | "failed" = "skipped";
+  let liveData = 0;
+  if (plan.branch === "reply_qa") {
+    const answer = await answerQuestion(content);
+    text = answer.text;
+    model = answer.model;
+    liveData = answer.liveData ? 1 : 0;
   }
 
   try {
-    const segments = await sendGroupText(groupOpenId, reply.text, { msgId });
-    logWebhook(type, reply.branch, { result: "sent", segments });
+    const segments = await sendGroupText(groupOpenId, text, { msgId });
+    finishReply(msgId, true);
+    logWebhook(type, plan.branch, { result: "sent", segments, model, live_data: liveData });
   } catch (error) {
-    console.error(
-      JSON.stringify({
-        event: "qq_webhook_reply_failed",
-        type,
-        branch: reply.branch,
-        result: "failed",
-        message: safeLogMessage(error),
-      }),
-    );
+    const status = error instanceof QqSendError ? error.status : null;
+    const errCode = error instanceof QqSendError ? error.errCode : null;
+    const duplicate = String(errCode) === DUPLICATE_ERR_CODE;
+    finishReply(msgId, duplicate);
+    logWebhook(type, duplicate ? "duplicate" : plan.branch, {
+      result: duplicate ? "duplicate" : "failed",
+      status,
+      err_code: errCode,
+      model,
+      live_data: liveData,
+    });
   }
 }
 
@@ -107,7 +121,7 @@ async function handleDispatch(
   }
   const valid = verifyEventSignature(requireEnv("QQ_APP_SECRET"), timestamp, rawBody, signature);
   if (!valid) return Response.json({ error: "invalid signature" }, { status: 401 });
-  await handleGroupEvent(payload);
+  await runAfterAck(() => handleGroupEvent(payload));
   return Response.json({ op: 12 });
 }
 

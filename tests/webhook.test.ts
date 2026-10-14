@@ -1,9 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resetReplyClaims } from "@/lib/dedup";
 import { POST } from "@/app/api/qq/webhook/route";
+import { QA_FAILED, QA_UNCONFIGURED } from "@/lib/qa";
 import { clearAccessTokenCache } from "@/lib/qq/token";
 import { signUtf8, signValidation } from "@/lib/qq/signature";
 
-const ENV_KEYS = ["QQ_APP_ID", "QQ_APP_SECRET", "QQ_API_BASE"] as const;
+const { createReply } = vi.hoisted(() => ({ createReply: vi.fn() }));
+
+vi.mock("openai", () => ({
+  default: class {
+    responses = { create: createReply };
+    constructor(_options: unknown) {}
+  },
+}));
+
+const ENV_KEYS = ["QQ_APP_ID", "QQ_APP_SECRET", "QQ_API_BASE", "OPENAI_API_KEY", "OPENAI_MODEL"] as const;
 
 describe("qq webhook", () => {
   const originalFetch = globalThis.fetch;
@@ -12,6 +23,8 @@ describe("qq webhook", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     clearAccessTokenCache();
+    resetReplyClaims();
+    createReply.mockReset();
     vi.restoreAllMocks();
     for (const key of ENV_KEYS) {
       const value = saved.get(key);
@@ -26,6 +39,8 @@ describe("qq webhook", () => {
     process.env.QQ_APP_ID = "test-app-id";
     process.env.QQ_APP_SECRET = secret;
     process.env.QQ_API_BASE = "https://sandbox.api.sgroup.qq.com";
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_MODEL;
   }
 
   it("answers callback validation with the signed plain token", async () => {
@@ -95,25 +110,6 @@ describe("qq webhook", () => {
     expect(logs.join("\n")).toContain('"type":"GROUP_ADD_ROBOT"');
     expect(logs.join("\n")).toContain('"branch":"ignore_event"');
     expect(logs.join("\n")).not.toContain("route-test-secret");
-
-    const ignored = JSON.stringify({
-      op: 0,
-      t: "GROUP_AT_MESSAGE_CREATE",
-      d: { id: "event-msg-ignored", group_openid: "gid-123", content: "今天随便聊聊" },
-    });
-    const ignoredResponse = await POST(
-      new Request("https://example.com/api/qq/webhook", {
-        method: "POST",
-        headers: {
-          "x-signature-ed25519": signUtf8("route-test-secret", `1725442341${ignored}`),
-          "x-signature-timestamp": "1725442341",
-        },
-        body: ignored,
-      }),
-    );
-    expect(ignoredResponse.status).toBe(200);
-    expect(logs.join("\n")).toContain('"branch":"ignore_command"');
-    expect(logs.join("\n")).not.toContain("今天随便聊聊");
   });
 
   it("replies with the event message id and still acks when sending fails", async () => {
@@ -125,7 +121,7 @@ describe("qq webhook", () => {
         return Response.json({ access_token: "test-token", expires_in: 7200 });
       }
       bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      return Response.json({ message: "send failed", err_code: 40054005, trace_id: "trace-webhook" }, { status: 500 });
+      return Response.json({ message: "send failed", err_code: 40054007, trace_id: "trace-webhook" }, { status: 500 });
     }) as typeof fetch;
 
     const raw = JSON.stringify({
@@ -195,5 +191,131 @@ describe("qq webhook", () => {
     expect(combined).toContain('"status":200');
     expect(combined).not.toContain("test-token");
     expect(combined).not.toContain("route-test-secret");
+  });
+
+  async function postAt(content: string, id: string): Promise<{ status: number; bodies: Array<Record<string, unknown>>; logs: string[] }> {
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("getAppAccessToken")) {
+        return Response.json({ access_token: "test-token", expires_in: 7200 });
+      }
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const fail = bodies.length === 1 && id === "event-send-fail";
+      if (fail) {
+        return Response.json({ message: "too long", err_code: 40054007, trace_id: "trace-fail" }, { status: 400 });
+      }
+      const duplicate = id === "event-deduped";
+      if (duplicate) {
+        return Response.json({ message: "deduped", err_code: 40054005, trace_id: "trace-dup" }, { status: 400 });
+      }
+      return Response.json({ id: "sent-1" }, { status: 200 });
+    }) as typeof fetch;
+    const raw = JSON.stringify({
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: { id, group_openid: "gid-123", content },
+    });
+    const response = await POST(
+      new Request("https://example.com/api/qq/webhook", {
+        method: "POST",
+        headers: {
+          "x-signature-ed25519": signUtf8("route-test-secret", `1725442341${raw}`),
+          "x-signature-timestamp": "1725442341",
+        },
+        body: raw,
+      }),
+    );
+    return { status: response.status, bodies, logs };
+  }
+
+  it("replies to an empty at-message, a normal question, and keeps the bind command", async () => {
+    useSecret();
+    const empty = await postAt("   ", "event-empty");
+    expect(empty.status).toBe(200);
+    expect(empty.bodies[0]?.content).toBe("我在，请告诉我你的问题。");
+    expect(empty.logs.join("\n")).toContain('"branch":"reply_empty"');
+    expect(empty.logs.join("\n")).toContain('"result":"sent"');
+
+    const question = await postAt("什么是通货膨胀", "event-question");
+    expect(question.bodies.at(-1)?.content).toBe(QA_UNCONFIGURED);
+    expect(question.logs.join("\n")).toContain('"branch":"reply_qa"');
+    expect(question.logs.join("\n")).toContain('"model":"unconfigured"');
+    expect(question.logs.join("\n")).not.toContain("什么是通货膨胀");
+
+    const command = await postAt("请绑定日报", "event-bind");
+    expect(command.bodies.at(-1)?.content).toBe("机器人连接成功，已识别当前群聊。");
+    expect(command.bodies.at(-1)?.msg_id).toBe("event-bind");
+  });
+
+  it("sends a short failure hint when the model call fails and does not mark a QQ error as sent", async () => {
+    useSecret();
+    process.env.OPENAI_API_KEY = "sk-test-key-value12";
+    process.env.OPENAI_MODEL = "test-model";
+    createReply.mockRejectedValue(new Error("timeout"));
+    const logs: string[] = [];
+    const errors: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("getAppAccessToken")) {
+        return Response.json({ access_token: "test-token", expires_in: 7200 });
+      }
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ id: "sent-model-fail" }, { status: 200 });
+    }) as typeof fetch;
+    const raw = JSON.stringify({
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: { id: "event-model-fail", group_openid: "gid-123", content: "解释一下市盈率" },
+    });
+    const response = await POST(
+      new Request("https://example.com/api/qq/webhook", {
+        method: "POST",
+        headers: {
+          "x-signature-ed25519": signUtf8("route-test-secret", `1725442341${raw}`),
+          "x-signature-timestamp": "1725442341",
+        },
+        body: raw,
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(bodies[0]?.content).toBe(QA_FAILED);
+    const combined = `${logs.join("\n")}\n${errors.join("\n")}`;
+    expect(combined).toContain('"model":"failed"');
+    expect(combined).toContain('"result":"sent"');
+    expect(combined).not.toContain("sk-test-key-value12");
+    expect(combined).not.toContain("解释一下市盈率");
+
+    const failed = await postAt("再问一次", "event-send-fail");
+    const failedLogs = failed.logs.join("\n");
+    expect(failedLogs).toContain('"result":"failed"');
+    expect(failedLogs).toContain('"err_code":40054007');
+    expect(failedLogs).not.toContain('"result":"sent"');
+  });
+
+  it("does not send a second reply for the same message id", async () => {
+    useSecret();
+    const first = await postAt("什么是债券", "event-repeat");
+    expect(first.bodies).toHaveLength(1);
+    const second = await postAt("什么是债券", "event-repeat");
+    expect(second.bodies).toHaveLength(0);
+    expect(second.logs.join("\n")).toContain('"branch":"duplicate"');
+    expect(second.logs.join("\n")).toContain('"result":"skipped"');
+
+    const deduped = await postAt("什么是基金", "event-deduped");
+    expect(deduped.logs.join("\n")).toContain('"result":"duplicate"');
+    expect(deduped.logs.join("\n")).toContain('"err_code":40054005');
+    expect(deduped.logs.join("\n")).not.toContain('"result":"sent"');
   });
 });

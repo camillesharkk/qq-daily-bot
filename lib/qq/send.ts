@@ -7,6 +7,18 @@ import { clearAccessTokenCache, getAccessToken } from "@/lib/qq/token";
 const GAP_MS = 300;
 const TIMEOUT_MS = 15_000;
 
+export class QqSendError extends Error {
+  readonly status: number;
+  readonly errCode: string | number | null;
+
+  constructor(status: number, errCode: string | number | null) {
+    super(`QQ message send failed: HTTP ${status}`);
+    this.name = "QqSendError";
+    this.status = status;
+    this.errCode = errCode;
+  }
+}
+
 export type SendGroupTextOptions = {
   msgId?: string;
   msgSeq?: number;
@@ -19,7 +31,7 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-function logQqFailure(status: number, raw: string, headers: Headers): void {
+function readQqError(raw: string, headers: Headers): { errCode: string | number | null; message: string; traceId: string | null } {
   let errCode: string | number | null = null;
   let message = "";
   let traceId = headers.get("x-tps-trace-id") ?? headers.get("x-trace-id");
@@ -34,15 +46,21 @@ function logQqFailure(status: number, raw: string, headers: Headers): void {
   } catch {
     message = "";
   }
+  return { errCode, message, traceId };
+}
+
+function logQqFailure(status: number, raw: string, headers: Headers): string | number | null {
+  const parsed = readQqError(raw, headers);
   console.error(
     JSON.stringify({
       event: "qq_send_failed",
       status,
-      err_code: errCode,
-      message: safeLogMessage(message),
-      trace_id: traceId,
+      err_code: parsed.errCode,
+      message: safeLogMessage(parsed.message),
+      trace_id: parsed.traceId,
     }),
   );
+  return parsed.errCode;
 }
 
 async function deliver(
@@ -84,8 +102,8 @@ async function deliver(
 
   if (!response.ok) {
     const raw = await response.text();
-    logQqFailure(response.status, raw, response.headers);
-    throw new Error(`QQ message send failed: HTTP ${response.status}`);
+    const errCode = logQqFailure(response.status, raw, response.headers);
+    throw new QqSendError(response.status, errCode);
   }
 
   console.log(JSON.stringify({ event: "qq_send_ok", status: response.status, msg_seq: msgSeq }));
