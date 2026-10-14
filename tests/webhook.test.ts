@@ -32,6 +32,7 @@ describe("qq webhook", () => {
       else process.env[key] = value;
     }
     saved.clear();
+    delete process.env.VERCEL_GIT_COMMIT_SHA;
   });
 
   function useSecret(secret = "route-test-secret"): void {
@@ -55,6 +56,52 @@ describe("qq webhook", () => {
       plain_token: "Arq0D5A61EgUu4OxUvOp",
       signature: signValidation("DG5g3B4j9X2KOErG", "1725442341", "Arq0D5A61EgUu4OxUvOp"),
     });
+  });
+
+  it("logs verification, signature results, and a retry after a failed send", async () => {
+    useSecret("DG5g3B4j9X2KOErG");
+    process.env.VERCEL_GIT_COMMIT_SHA = "abc123def";
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+    const raw = JSON.stringify({
+      op: 13,
+      d: { plain_token: "Arq0D5A61EgUu4OxUvOp", event_ts: "1725442341" },
+    });
+    const signature = signValidation("DG5g3B4j9X2KOErG", "1725442341", "Arq0D5A61EgUu4OxUvOp");
+    const validation = await POST(new Request("https://example.com/api/qq/webhook", { method: "POST", body: raw }));
+    expect(validation.status).toBe(200);
+    const validationLogs = logs.join("\n");
+    expect(validationLogs).toContain('"op":13');
+    expect(validationLogs).toContain('"sha":"abc123def"');
+    expect(validationLogs).toContain('"branch":"verification"');
+    expect(validationLogs).not.toContain(signature);
+    expect(validationLogs).not.toContain("DG5g3B4j9X2KOErG");
+
+    logs.length = 0;
+    const unsigned = await POST(
+      new Request("https://example.com/api/qq/webhook", {
+        method: "POST",
+        body: JSON.stringify({ op: 0, t: "GROUP_AT_MESSAGE_CREATE", d: { id: "m1", group_openid: "gid-123", content: "你好" } }),
+      }),
+    );
+    expect(unsigned.status).toBe(401);
+    expect(logs.join("\n")).toContain('"branch":"missing_signature"');
+    expect(logs.join("\n")).toContain('"result":"invalid"');
+
+    useSecret();
+    const failed = await postAt("你好", "event-send-fail");
+    expect(failed.bodies).toHaveLength(1);
+    expect(failed.logs.join("\n")).toContain('"branch":"signature"');
+    expect(failed.logs.join("\n")).toContain('"result":"valid"');
+    expect(failed.logs.join("\n")).toContain('"result":"scheduled"');
+    expect(failed.logs.join("\n")).toContain('"result":"started"');
+    expect(failed.logs.join("\n")).toContain('"result":"failed"');
+    expect(failed.logs.join("\n")).toContain('"result":"finished"');
+    const retry = await postAt("你好", "event-send-fail");
+    expect(retry.bodies).toHaveLength(1);
+    expect(retry.logs.join("\n")).not.toContain('"result":"skipped"');
   });
 
   it("rejects a business event when signature headers are missing or the body changes", async () => {

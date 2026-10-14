@@ -1,4 +1,4 @@
-import { beginReply, finishReply } from "@/lib/dedup";
+import { finishReply, hasReply } from "@/lib/dedup";
 import { requireEnv } from "@/lib/env";
 import { isRecord } from "@/lib/guard";
 import { answerQuestion } from "@/lib/qa";
@@ -14,7 +14,17 @@ export const maxDuration = 60;
 const GROUP_EVENTS = new Set(["GROUP_AT_MESSAGE_CREATE", "GROUP_ADD_ROBOT", "GROUP_MSG_RECEIVE"]);
 const DUPLICATE_ERR_CODE = "40054005";
 
+function deploymentSha(): string {
+  const sha = process.env.VERCEL_GIT_COMMIT_SHA;
+  return typeof sha === "string" && /^[0-9a-f]{7,40}$/i.test(sha) ? sha : "local";
+}
+
+function logWebhook(type: string, branch: string, extra?: Record<string, string | number | null>): void {
+  console.log(JSON.stringify({ event: "qq_webhook_event", sha: deploymentSha(), type, branch, ...extra }));
+}
+
 function badRequest(): Response {
+  logWebhook("", "invalid_payload", { op: null });
   return Response.json({ error: "invalid payload" }, { status: 400 });
 }
 
@@ -25,12 +35,9 @@ function handleValidation(payload: Record<string, unknown>): Response {
   if (typeof plainToken !== "string" || (typeof eventTs !== "string" && typeof eventTs !== "number")) {
     return badRequest();
   }
+  logWebhook("", "verification", { op: 13 });
   const signature = signValidation(requireEnv("QQ_APP_SECRET"), String(eventTs), plainToken);
   return Response.json({ plain_token: plainToken, signature });
-}
-
-function logWebhook(type: string, branch: string, extra?: Record<string, string | number | null>): void {
-  console.log(JSON.stringify({ event: "qq_webhook_event", type, branch, ...extra }));
 }
 
 function messageId(data: Record<string, unknown>): string {
@@ -39,17 +46,24 @@ function messageId(data: Record<string, unknown>): string {
   return "";
 }
 
-async function runAfterAck(task: () => Promise<void>): Promise<void> {
+async function runAfterAck(type: string, task: () => Promise<void>): Promise<void> {
+  logWebhook(type, "after", { result: "scheduled" });
+  const run = async (): Promise<void> => {
+    logWebhook(type, "after", { result: "started" });
+    try {
+      await task();
+      logWebhook(type, "after", { result: "finished" });
+    } catch (error: unknown) {
+      logWebhook(type, "after", { result: "failed" });
+      console.error(JSON.stringify({ event: "qq_webhook_failed", message: safeLogMessage(error) }));
+    }
+  };
   if (process.env.VITEST) {
-    await task();
+    await run();
     return;
   }
   const { after } = await import("next/server");
-  after(() =>
-    task().catch((error: unknown) => {
-      console.error(JSON.stringify({ event: "qq_webhook_failed", message: safeLogMessage(error) }));
-    }),
-  );
+  after(() => run());
 }
 
 async function handleGroupEvent(payload: Record<string, unknown>): Promise<void> {
@@ -70,10 +84,10 @@ async function handleGroupEvent(payload: Record<string, unknown>): Promise<void>
 
   const msgId = messageId(data);
   if (!groupOpenId || !msgId) {
-    logWebhook(type, "missing_target");
+    logWebhook(type, "missing_target", { result: "skipped" });
     return;
   }
-  if (!beginReply(msgId)) {
+  if (hasReply(msgId)) {
     logWebhook(type, "duplicate", { result: "skipped" });
     return;
   }
@@ -114,14 +128,17 @@ async function handleDispatch(
   rawBody: string,
   payload: Record<string, unknown>,
 ): Promise<Response> {
+  const type = typeof payload.t === "string" ? payload.t : "";
   const signature = request.headers.get("X-Signature-Ed25519");
   const timestamp = request.headers.get("X-Signature-Timestamp");
   if (!signature || !timestamp) {
+    logWebhook(type, "missing_signature", { op: 0, result: "invalid" });
     return Response.json({ error: "invalid signature" }, { status: 401 });
   }
   const valid = verifyEventSignature(requireEnv("QQ_APP_SECRET"), timestamp, rawBody, signature);
+  logWebhook(type, "signature", { op: 0, result: valid ? "valid" : "invalid" });
   if (!valid) return Response.json({ error: "invalid signature" }, { status: 401 });
-  await runAfterAck(() => handleGroupEvent(payload));
+  await runAfterAck(type, () => handleGroupEvent(payload));
   return Response.json({ op: 12 });
 }
 
@@ -134,13 +151,17 @@ export async function POST(request: Request): Promise<Response> {
     return badRequest();
   }
   if (!isRecord(payload) || typeof payload.op !== "number") return badRequest();
+  const type = typeof payload.t === "string" ? payload.t : "";
+  logWebhook(type, "received", { op: payload.op });
 
   try {
     if (payload.op === 13) return handleValidation(payload);
     if (payload.op === 0) return await handleDispatch(request, rawBody, payload);
   } catch (error) {
+    logWebhook(type, "configuration", { op: payload.op, result: "failed" });
     console.error(JSON.stringify({ event: "qq_webhook_failed", message: safeLogMessage(error) }));
     return Response.json({ error: "server configuration error" }, { status: 500 });
   }
+  logWebhook(type, "unsupported_opcode", { op: payload.op });
   return Response.json({ error: "unsupported opcode" }, { status: 400 });
 }

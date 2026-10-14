@@ -9,11 +9,9 @@ function prune(now: number): void {
   }
 }
 
-export function beginReply(id: string, now = Date.now()): boolean {
+export function hasReply(id: string, now = Date.now()): boolean {
   prune(now);
-  if (claims.has(id)) return false;
-  claims.set(id, { at: now });
-  return true;
+  return claims.has(id);
 }
 
 export function finishReply(id: string, sent: boolean, now = Date.now()): void {
