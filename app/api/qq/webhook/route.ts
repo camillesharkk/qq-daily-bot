@@ -1,4 +1,5 @@
-import { readDaily } from "@/lib/daily-store";
+import { readReadyReport } from "@/lib/daily-store";
+import { DailyStoreError } from "@/lib/db";
 import { shanghaiDate } from "@/lib/date";
 import { finishReply, hasReply } from "@/lib/dedup";
 import { requireEnv } from "@/lib/env";
@@ -15,6 +16,16 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const GROUP_EVENTS = new Set(["GROUP_AT_MESSAGE_CREATE", "GROUP_ADD_ROBOT", "GROUP_MSG_RECEIVE"]);
+const DAILY_STORE_UNAVAILABLE = "日报存储暂时不可用，请稍后再试。";
+
+async function savedReport(date: string): Promise<string | null | "unavailable"> {
+  try {
+    return await readReadyReport(date);
+  } catch (error) {
+    if (error instanceof DailyStoreError) return "unavailable";
+    throw error;
+  }
+}
 const DUPLICATE_ERR_CODE = "40054005";
 
 function deploymentSha(): string {
@@ -101,17 +112,22 @@ async function handleGroupEvent(payload: Record<string, unknown>): Promise<void>
   let model: "skipped" | "unconfigured" | "ok" | "failed" | "limited" = "skipped";
   let liveData = 0;
   if (plan.branch === "reply_daily") {
-    text = readDaily(shanghaiDate())?.content ?? DAILY_MISSING;
+    const saved = await savedReport(shanghaiDate());
+    text = saved === "unavailable" ? DAILY_STORE_UNAVAILABLE : saved ?? DAILY_MISSING;
   } else if (plan.branch === "reply_qa") {
     if (!allowQuestion(groupOpenId)) {
       text = QA_BUSY;
       model = "limited";
     } else {
-      const report = plan.useReport ? readDaily(shanghaiDate())?.content : undefined;
-      const answer = await answerQuestion(content, report);
-      text = answer.text;
-      model = answer.model;
-      liveData = answer.liveData ? 1 : 0;
+      const saved = plan.useReport ? await savedReport(shanghaiDate()) : null;
+      if (saved === "unavailable") {
+        text = DAILY_STORE_UNAVAILABLE;
+      } else {
+        const answer = await answerQuestion(content, saved ?? undefined);
+        text = answer.text;
+        model = answer.model;
+        liveData = answer.liveData ? 1 : 0;
+      }
     }
   } else {
     text = plan.text;

@@ -1,17 +1,13 @@
 # QQ Daily Bot
 
-这是一个部署在 Vercel 上的 QQ 群财经学习日报机器人。它接收 QQ 开放平台 Webhook，每天北京时间 09:00 生成一份中文财经学习日报，并发送到你绑定的 QQ 群。
-
-没有 OpenAI API Key 时，也可以先用固定测试文案把 QQ 发送链路跑通。
+这是一个部署在 Vercel 上的 QQ 群财经学习机器人。日报原文由你在 ChatGPT 聊天里生成，再粘贴到管理页保存；机器人负责保存和转发，不在服务器上调用 OpenAI 生成日报。群里的普通提问仍走 DeepSeek。
 
 ## 你需要准备
 
 - 一个 GitHub 仓库：`camillesharkk/qq-daily-bot`
 - 一个 [Vercel](https://vercel.com) 账号
 - 一个 [QQ 机器人](https://q.qq.com) 的 AppID 和 AppSecret
-- 可选：OpenAI API Key，或一个能返回日报正文的 HTTPS 地址
-
-ChatGPT Plus 不等于 OpenAI API 额度。Plus 是聊天产品订阅；调用本项目的 OpenAI 接口需要单独开通 API，并按用量计费。
+- 一个新建的 Neon Postgres 数据库，只给这个机器人使用
 
 ## 本地检查
 
@@ -42,7 +38,7 @@ git push origin main
 
 ## 第一次部署要配置的环境变量
 
-第一次只配置下面 5 个。`QQ_GROUP_OPENID` 先留空，等群里绑定成功后再填。
+第一次配置下面这些变量。`QQ_GROUP_OPENID` 先留空，等群里绑定成功后再填。`DATABASE_URL` 使用新建的 Neon 数据库。
 
 | 变量 | 说明 |
 | --- | --- |
@@ -50,7 +46,8 @@ git push origin main
 | `QQ_APP_SECRET` | QQ 机器人 AppSecret，只放在服务端环境变量里 |
 | `QQ_API_BASE` | 开发阶段填 `https://sandbox.api.sgroup.qq.com` |
 | `CRON_SECRET` | 一串足够长的随机字符串，用来保护定时任务 |
-| `ADMIN_TOKEN` | 另一串随机字符串，用来保护手动测试接口 |
+| `ADMIN_TOKEN` | 另一串随机字符串，用来保护管理页和手动测试接口 |
+| `DATABASE_URL` | 新建 Neon 数据库的连接串，只放在服务端 |
 
 `QQ_API_BASE` 的默认值也是沙箱地址。正式审核上线后，再把它改成：
 
@@ -78,7 +75,7 @@ https://<vercel-domain>/api/qq/webhook
 ## 绑定 QQ 群
 
 1. 把机器人拉进目标群。
-2. 在群里 @机器人，发送 `绑定日报`。也可以发送包含“测试”的消息。只发送 `日报` 会读取当天已经生成的报告，不会重新生成。
+2. 在群里 @机器人，发送 `绑定日报`。也可以发送包含“测试”的消息。只发送 `日报` 会读取当天已经保存的原文，不会重新生成。
 3. 机器人会回复：`机器人连接成功，已识别当前群聊。`
 4. 打开 Vercel 项目的 Logs，搜索：
 
@@ -90,6 +87,29 @@ GROUP_OPENID_CAPTURED=
 6. 重新部署，让新的环境变量生效。
 
 日志里只会打印这一条群标识，用来完成第一次绑定。不要把 AppSecret、Access Token 或其他密钥打到日志里，也不要把这行日志公开转发。
+
+## 保存和发送日报
+
+服务器上的 `/api/cron/daily` 已暂停，不会再调用 OpenAI 生成或发送日报。ChatGPT 聊天里原来的定时任务不在这个仓库中，不受这次改动影响。
+
+1. 在 Neon 新建一个只给 `qq-daily-bot` 使用的 Postgres 项目，不要复用其他项目的生产库。
+2. 把连接串填进 Vercel 的 `DATABASE_URL`。不要把它写进网址、前端代码或日志。
+3. 在已配置该变量的环境执行 `npm run db:migrate`。脚本只执行 `db/migrations/001_daily_reports.sql`。
+4. 打开：
+
+```text
+https://<你的域名>/admin/daily
+```
+
+5. 在页面里输入 `ADMIN_TOKEN`。密钥只放在请求头里，不要加到网址上。
+6. 选择北京时间的报告日期，粘贴日报原文。先点“预览将发到 QQ 的内容”，确认去掉链接后的分段。
+7. “保存”只写入数据库。群里 @机器人并发送 `日报` 会读到这份原文。
+8. “保存并发送到已绑定群”会先保存，再主动发到 `QQ_GROUP_OPENID`。同一天同一群已经发送成功时不会再发。发送失败会留下正文和失败状态，可以再次发送。发送结果不明确时不会自动重发。
+9. 主动发送需要 QQ 允许机器人主动发群消息。沙箱接口只能发给沙箱群；正式群需要机器人审核上线，并且 `QQ_API_BASE` 使用 `https://api.sgroup.qq.com`。如果 QQ 返回 `40034105`，正文仍然已保存，到群里 @机器人发送 `日报` 即可被动读取。
+
+群里除固定命令外的提问走 DeepSeek。需要同时配置 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_MODEL`。当前官方文档列出的模型名是 `deepseek-flash` 和 `deepseek-v4-pro`，项目不会替你选择。
+
+QQ 群可能拦截未报备的网址。发送前会去掉 `http://` 和 `https://` 链接，只保留来源名称。数据库里的日报正文仍保留你粘贴的原文。
 
 ## 手动测试发送
 
@@ -130,47 +150,6 @@ Invoke-RestMethod -Uri "https://<vercel-domain>/api/health"
 { "ok": true, "service": "qq-daily-bot" }
 ```
 
-## 配置日报内容
-
-手动测试成功后，再配置正式日报来源。优先级如下：
-
-1. `REPORT_SOURCE_URL`：服务会 GET 这个地址。如果同时设置了 `REPORT_SOURCE_TOKEN`，会带上 `Authorization: Bearer <REPORT_SOURCE_TOKEN>`。返回 `{ "content": "..." }` 或纯文本都可以。
-2. `OPENAI_API_KEY` 和 `OPENAI_MODEL`：使用 OpenAI 官方 Node.js SDK 的 Responses API，并启用当前官方的 `web_search` 工具。请到 [OpenAI web search 文档](https://developers.openai.com/api/docs/guides/tools-web-search) 选择一个支持 Responses API 和 web search、成本较低的现用模型，把模型 ID 填进 `OPENAI_MODEL`。项目不会猜测模型名。未填写 `OPENAI_MODEL`，或生成失败时，会回退到 `DAILY_MESSAGE`，不会把 OpenAI 的报错发到群里。
-3. `DAILY_MESSAGE`：固定文案，适合先打通发送链路。
-
-三个来源都没有可用内容时，定时任务返回服务器错误，不会发送空消息。
-
-群里除固定命令外的提问走 DeepSeek，不替换上面的 OpenAI 日报。需要同时配置 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_MODEL`。当前官方文档列出的模型名是 `deepseek-flash` 和 `deepseek-v4-pro`，项目不会替你选择。
-
-定时任务按 `0 1 * * *` 运行，也就是北京时间 09:00。它会主动发到 `QQ_GROUP_OPENID`，因此需要该变量，以及 QQ 侧允许主动发群。群里只发送“日报”时，读取当天已经生成的内容，不会再调用 OpenAI。
-
-QQ 群可能拦截未报备的网址。发送前会去掉 `http://` 和 `https://` 链接，只保留来源名称。保存的日报正文仍可带链接，供再次阅读和追问引用。
-
-## 每天什么时候发送
-
-`vercel.json` 里的 Cron 表达式是：
-
-```text
-0 1 * * *
-```
-
-路径是 `/api/cron/daily`。
-
-Vercel Cron 使用 UTC。`01:00 UTC` 就是北京时间 `09:00`。中国不实行夏令时，所以这个对应关系全年不变。
-
-Vercel 在配置了 `CRON_SECRET` 后，会给定时请求带上 `Authorization: Bearer <CRON_SECRET>`。本服务会校验这个请求头，校验失败返回 401。
-
-也可以手动触发一次定时任务：
-
-```powershell
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "https://<vercel-domain>/api/cron/daily" `
-  -Headers @{ Authorization = "Bearer <CRON_SECRET>" }
-```
-
-成功时只返回是否成功、分段数量和日期，不返回日报全文、群 OpenID 或任何密钥。
-
 ## 环境变量一览
 
 复制 `.env.example` 只作为本地对照。不要创建包含真实密钥的 `.env` 文件并提交。
@@ -182,13 +161,9 @@ QQ_GROUP_OPENID=
 QQ_API_BASE=https://sandbox.api.sgroup.qq.com
 CRON_SECRET=
 ADMIN_TOKEN=
-OPENAI_API_KEY=
-OPENAI_MODEL=
+DATABASE_URL=
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=
-DAILY_MESSAGE=
-REPORT_SOURCE_URL=
-REPORT_SOURCE_TOKEN=
 ```
 
 `QQ_APP_SECRET` 只从服务端 `process.env` 读取。任何接口响应都不会返回环境变量或密钥。

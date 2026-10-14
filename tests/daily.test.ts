@@ -17,9 +17,9 @@ describe("daily commands and schedule", () => {
     expect(planReply("什么是通货膨胀")).toEqual({ branch: "reply_qa", useReport: false });
   });
 
-  it("keeps the 09:00 Asia/Shanghai cron and unverified holding labels", () => {
-    const config = JSON.parse(readFileSync("vercel.json", "utf8")) as { crons: Array<{ path: string; schedule: string }> };
-    expect(config.crons[0]).toEqual({ path: "/api/cron/daily", schedule: "0 1 * * *" });
+  it("keeps the server cron paused and unverified holding labels", () => {
+    const config = JSON.parse(readFileSync("vercel.json", "utf8")) as { crons: unknown[] };
+    expect(config.crons).toEqual([]);
     expect(shanghaiDate(new Date("2026-10-13T16:00:00Z"))).toBe("2026-10-14");
     expect(shanghaiDate(new Date("2026-10-13T15:59:00Z"))).toBe("2026-10-13");
     expect(HOLDINGS.reduce((sum, item) => sum + item.weightPercent, 0)).toBe(100);

@@ -80,17 +80,22 @@ async function deliver(
   };
   if (msgId) payload.msg_id = msgId;
 
-  const response = await fetch(url, {
-    method: "POST",
-    cache: "no-store",
-    headers: {
-      Authorization: `QQBot ${token}`,
-      "Content-Type": "application/json",
-      "X-Union-Appid": appId,
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        Authorization: `QQBot ${token}`,
+        "Content-Type": "application/json",
+        "X-Union-Appid": appId,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch {
+    throw new QqSendError(0, "transport");
+  }
 
   if (response.status === 401 && allowRetry) {
     const raw = await response.text();

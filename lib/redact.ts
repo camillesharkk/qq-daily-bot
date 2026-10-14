@@ -6,6 +6,7 @@ const SECRET_ENV_KEYS = [
   "CRON_SECRET",
   "ADMIN_TOKEN",
   "QQ_GROUP_OPENID",
+  "DATABASE_URL",
 ] as const;
 
 export function safeLogMessage(error: unknown): string {
@@ -13,6 +14,7 @@ export function safeLogMessage(error: unknown): string {
     error instanceof Error ? error.message : typeof error === "string" ? error : "unknown error";
   message = message.replace(/sk-[A-Za-z0-9_-]{8,}/g, "[redacted]");
   message = message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
+  message = message.replace(/postgres(?:ql)?:\/\/\S+/gi, "postgresql://[redacted]");
   for (const key of SECRET_ENV_KEYS) {
     const value = process.env[key];
     if (value && value.length >= 8) {

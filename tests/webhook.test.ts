@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetReplyClaims } from "@/lib/dedup";
 import { shanghaiDate } from "@/lib/date";
-import { resetDailyStore, saveGenerated } from "@/lib/daily-store";
+import { saveReport } from "@/lib/daily-store";
+import { useQueryForTests } from "@/lib/db";
+import { createMemoryQuery } from "./memory-db";
 import { resetQuestionLimits } from "@/lib/limit";
 import { POST } from "@/app/api/qq/webhook/route";
 import { QA_FAILED, QA_UNCONFIGURED } from "@/lib/qa";
@@ -24,13 +26,17 @@ describe("qq webhook", () => {
   const originalFetch = globalThis.fetch;
   const saved = new Map<string, string | undefined>();
 
+  beforeEach(() => {
+    useQueryForTests(createMemoryQuery());
+  });
+
   afterEach(() => {
     globalThis.fetch = originalFetch;
     clearAccessTokenCache();
     resetReplyClaims();
     createReply.mockReset();
     vi.restoreAllMocks();
-    resetDailyStore();
+    useQueryForTests(null);
     resetQuestionLimits();
     for (const key of ENV_KEYS) {
       const value = saved.get(key);
@@ -314,7 +320,7 @@ describe("qq webhook", () => {
     expect(missing.logs.join("\n")).toContain('"branch":"reply_daily"');
     expect(missing.logs.join("\n")).not.toContain("已收到你的问题");
 
-    saveGenerated(shanghaiDate(), "今天的学习：利率是借钱的价格。");
+    await saveReport(shanghaiDate(), "今天的学习：利率是借钱的价格。");
     const saved = await postAt("日报", "event-daily-saved");
     expect(saved.bodies.at(-1)?.content).toBe("今天的学习：利率是借钱的价格。");
     expect(saved.logs.join("\n")).not.toContain("api.deepseek.com");
