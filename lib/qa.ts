@@ -1,11 +1,16 @@
-import OpenAI from "openai";
 import { optionalEnv } from "@/lib/env";
 import { isRecord } from "@/lib/guard";
 import { safeLogMessage } from "@/lib/redact";
 
-const OPENAI_TIMEOUT_MS = 20_000;
+const QA_TIMEOUT_MS = 20_000;
+const QA_MAX_TOKENS = 800;
+const QA_MAX_CHARS = 1200;
+const REPORT_CONTEXT_CHARS = 3000;
+const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
+
 export const QA_UNCONFIGURED = "已收到你的问题，智能问答尚未配置完成。";
 export const QA_FAILED = "这次没能完成回答，请稍后再试。";
+export const QA_BUSY = "提问有点频繁，请稍后再试。";
 const LIVE_DISCLAIMER = "本次没有获取到实时资料，因此不能把回答当作最新新闻或行情。";
 const LIVE_PATTERN = /新闻|行情|股价|大盘|汇率|财报|最新|涨跌|收盘|开盘/;
 
@@ -17,61 +22,71 @@ export type QaAnswer = {
   liveData: boolean;
 };
 
-function readOutputText(response: OpenAI.Responses.Response): string {
-  const direct = response.output_text.trim();
-  if (direct) return direct;
-  const chunks: string[] = [];
-  for (const item of response.output) {
-    if (!isRecord(item) || !Array.isArray(item.content)) continue;
-    for (const part of item.content) {
-      if (isRecord(part) && typeof part.text === "string" && part.text.trim()) chunks.push(part.text);
-    }
-  }
-  return chunks.join("\n").trim();
+function clip(text: string, max: number): string {
+  const units = Array.from(text);
+  return units.length <= max ? text : units.slice(0, max).join("");
 }
 
-function hasLiveSources(response: OpenAI.Responses.Response): boolean {
-  for (const item of response.output) {
-    if (!isRecord(item) || item.type !== "web_search_call" || item.status !== "completed") continue;
-    const action = item.action;
-    if (!isRecord(action)) continue;
-    if (Array.isArray(action.sources) && action.sources.length > 0) return true;
-    if (typeof action.url === "string" && action.url.trim()) return true;
+function systemPrompt(report?: string): string {
+  const lines = [
+    "你是面向金融新手的中文助手。先用通俗的话解释，再给出专业名称。",
+    "区分事实和推断。不要编造新闻、价格、财报、基金代码、持仓盈亏、汇率对冲或组合收益。",
+    "你没有联网检索。禁止声称已经查询实时新闻、股价或行情。不要输出 http 或 https 链接。",
+  ];
+  if (report?.trim()) {
+    lines.push("下面是今天已经生成的日报，只能当作参考，不是实时行情。不要把日报里没有的数字说成事实。");
+    lines.push(clip(report.trim(), REPORT_CONTEXT_CHARS));
+  } else {
+    lines.push("今天没有可引用的日报。不要编造日报内容。");
   }
-  return false;
+  return lines.join("\n");
+}
+
+function readChatText(parsed: unknown): string {
+  if (!isRecord(parsed) || !Array.isArray(parsed.choices)) return "";
+  const first = parsed.choices[0];
+  if (!isRecord(first) || !isRecord(first.message)) return "";
+  return typeof first.message.content === "string" ? first.message.content.trim() : "";
 }
 
 export function needsLiveInfo(question: string): boolean {
   return LIVE_PATTERN.test(question);
 }
 
-export async function answerQuestion(question: string): Promise<QaAnswer> {
-  const apiKey = optionalEnv("OPENAI_API_KEY");
-  const model = optionalEnv("OPENAI_MODEL");
+export async function answerQuestion(question: string, report?: string): Promise<QaAnswer> {
+  const apiKey = optionalEnv("DEEPSEEK_API_KEY");
+  const model = optionalEnv("DEEPSEEK_MODEL");
   if (!apiKey || !model) {
     return { text: QA_UNCONFIGURED, model: "unconfigured", liveData: false };
   }
 
   const liveQuestion = needsLiveInfo(question);
   try {
-    const client = new OpenAI({ apiKey, timeout: OPENAI_TIMEOUT_MS, maxRetries: 0 });
-    const response = await client.responses.create({
-      model,
-      input: [
-        "你是面向金融新手的中文助手。用中文回答问题。",
-        "区分事实和推断。不要编造新闻、价格、财报数据或引用。不要输出 http 或 https 链接。",
-        "只有本次请求实际拿到网页检索结果时，才可以说明使用了最新资料。没有检索结果时，禁止声称内容是最新新闻或最新行情。",
-        `问题：${question}`,
-      ].join("\n"),
-      ...(liveQuestion ? { tools: [{ type: "web_search" as const }] } : {}),
+    const response = await fetch(DEEPSEEK_URL, {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt(report) },
+          { role: "user", content: question },
+        ],
+        max_tokens: QA_MAX_TOKENS,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(QA_TIMEOUT_MS),
     });
-    const text = readOutputText(response);
-    if (!text) throw new Error("OpenAI returned empty answer");
-    const liveData = liveQuestion && hasLiveSources(response);
+    if (!response.ok) throw new Error(`DeepSeek request failed: HTTP ${response.status}`);
+    const text = clip(readChatText(await response.json()), QA_MAX_CHARS);
+    if (!text) throw new Error("DeepSeek returned empty answer");
     return {
-      text: liveQuestion && !liveData ? `${LIVE_DISCLAIMER}\n${text}` : text,
+      text: liveQuestion ? `${LIVE_DISCLAIMER}\n${text}` : text,
       model: "ok",
-      liveData,
+      liveData: false,
     };
   } catch (error) {
     console.error(JSON.stringify({ event: "qa_failed", model: "failed", message: safeLogMessage(error) }));

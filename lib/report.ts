@@ -2,15 +2,35 @@ import OpenAI from "openai";
 import { shanghaiDate } from "@/lib/date";
 import { optionalEnv } from "@/lib/env";
 import { isRecord } from "@/lib/guard";
+import { HOLDINGS, MAPPING_NOTE, retrievalFailureReport } from "@/lib/holdings";
 import { safeLogMessage } from "@/lib/redact";
 
 const SOURCE_TIMEOUT_MS = 15_000;
 const OPENAI_TIMEOUT_MS = 45_000;
 
-const REPORT_PROMPT = [
-  "你是一名面向金融新手的中文财经老师。生成今天的金融学习日报，日期按 Asia/Shanghai。覆盖重要国内外财经新闻、上市公司财报或公司动态、宏观经济、主要市场变化、重要商业人物或政策制定者讲话。每条包括：发生了什么、中文解释、相关专业名词解释、为什么重要、可能的影响、推断链条、需要继续观察什么。明确区分事实与推断，不编造数据。尽可能给出信息来源名称和原始标题，但QQ群正文中不要放未经报备的URL。内容适合金融初学者阅读。",
-  "明确区分事实和推断。不得编造新闻、价格、财报数据或引用。输出中文。专业术语第一次出现时使用“中文名称（English term / abbreviation）”格式。",
-].join("\n");
+function holdingLines(): string {
+  return HOLDINGS.map(
+    (item) => `- ${item.label} ${item.weightPercent}%：${item.watch}。状态：${item.status}。保留用户原始名称。`,
+  ).join("\n");
+}
+
+export function reportInstructions(date: string): string {
+  return [
+    "你是一名面向金融新手的中文财经老师。生成今天的金融学习日报，日期按 Asia/Shanghai。",
+    "覆盖重要国内外财经新闻、上市公司财报或公司动态、宏观经济、主要市场变化、重要商业人物或政策制定者讲话。",
+    "每条包括：短原文摘录、中文翻译、发生了什么、术语解释、为什么重要、可能的影响、推断依据、需要继续观察什么。",
+    "明确区分事实与推断。不得编造新闻、价格、财报数据、基金代码、产品价格、持仓盈亏、汇率对冲或组合收益。",
+    "每条新闻给出来源名称、来源链接和发布时间。只使用本次检索拿到的资料。没有检索结果时，不要把模型记忆写成今日新闻。",
+    "输出中文。专业术语第一次出现时使用“中文名称（English term / abbreviation）”格式。",
+    "以下是用户的关注范围和比例，不是已经识别的证券，也不要把重叠项目的比例相加当成真实风险权重。",
+    holdingLines(),
+    "纳指与美纳指可能重叠。同一事件只写一次，并列出关联的关注项目。",
+    "对每个关注项目逐项检查：有重要动态必须写入；没有重要新增时写“无重要新增”；这次没检索到资料时写“检索失败”。三种状态不要混用。",
+    "额外关注澳元兑美元。不要假定任何产品有汇率对冲。",
+    `今天（Asia/Shanghai）是 ${date}。`,
+    `全文最后单独一行写：${MAPPING_NOTE}`,
+  ].join("\n");
+}
 
 function parseReportPayload(raw: string): string {
   const trimmed = raw.trim();
@@ -73,12 +93,27 @@ async function generateOpenAIReport(): Promise<string> {
   const client = new OpenAI({ apiKey, timeout: OPENAI_TIMEOUT_MS, maxRetries: 0 });
   const response = await client.responses.create({
     model,
-    input: `${REPORT_PROMPT}\n\n今天（Asia/Shanghai）是 ${shanghaiDate()}。`,
+    input: reportInstructions(shanghaiDate()),
     tools: [{ type: "web_search" }],
   });
+  if (!hasLiveSources(response)) {
+    console.error(JSON.stringify({ event: "openai_report_no_sources" }));
+    return retrievalFailureReport();
+  }
   const text = readOutputText(response);
   if (!text) throw new Error("OpenAI returned empty report");
-  return text;
+  return text.includes(MAPPING_NOTE) ? text : `${text.trim()}\n${MAPPING_NOTE}`;
+}
+
+function hasLiveSources(response: OpenAI.Responses.Response): boolean {
+  for (const item of response.output) {
+    if (!isRecord(item) || item.type !== "web_search_call" || item.status !== "completed") continue;
+    const action = item.action;
+    if (!isRecord(action)) continue;
+    if (Array.isArray(action.sources) && action.sources.length > 0) return true;
+    if (typeof action.url === "string" && action.url.trim()) return true;
+  }
+  return false;
 }
 
 export async function buildDailyReport(): Promise<string> {

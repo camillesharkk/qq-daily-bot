@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetReplyClaims } from "@/lib/dedup";
+import { shanghaiDate } from "@/lib/date";
+import { resetDailyStore, saveGenerated } from "@/lib/daily-store";
+import { resetQuestionLimits } from "@/lib/limit";
 import { POST } from "@/app/api/qq/webhook/route";
 import { QA_FAILED, QA_UNCONFIGURED } from "@/lib/qa";
+import { DAILY_MISSING } from "@/lib/reply";
 import { clearAccessTokenCache } from "@/lib/qq/token";
 import { signUtf8, signValidation } from "@/lib/qq/signature";
 
@@ -14,7 +18,7 @@ vi.mock("openai", () => ({
   },
 }));
 
-const ENV_KEYS = ["QQ_APP_ID", "QQ_APP_SECRET", "QQ_API_BASE", "OPENAI_API_KEY", "OPENAI_MODEL"] as const;
+const ENV_KEYS = ["QQ_APP_ID", "QQ_APP_SECRET", "QQ_API_BASE", "OPENAI_API_KEY", "OPENAI_MODEL", "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"] as const;
 
 describe("qq webhook", () => {
   const originalFetch = globalThis.fetch;
@@ -26,6 +30,8 @@ describe("qq webhook", () => {
     resetReplyClaims();
     createReply.mockReset();
     vi.restoreAllMocks();
+    resetDailyStore();
+    resetQuestionLimits();
     for (const key of ENV_KEYS) {
       const value = saved.get(key);
       if (value === undefined) delete process.env[key];
@@ -42,6 +48,8 @@ describe("qq webhook", () => {
     process.env.QQ_API_BASE = "https://sandbox.api.sgroup.qq.com";
     delete process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_MODEL;
+    delete process.env.DEEPSEEK_API_KEY;
+    delete process.env.DEEPSEEK_MODEL;
   }
 
   it("answers callback validation with the signed plain token", async () => {
@@ -299,11 +307,23 @@ describe("qq webhook", () => {
     expect(command.bodies.at(-1)?.msg_id).toBe("event-bind");
   });
 
+  it("reads a stored daily report and does not generate one when it is missing", async () => {
+    useSecret();
+    const missing = await postAt("日报", "event-daily-missing");
+    expect(missing.bodies[0]?.content).toBe(DAILY_MISSING);
+    expect(missing.logs.join("\n")).toContain('"branch":"reply_daily"');
+    expect(missing.logs.join("\n")).not.toContain("已收到你的问题");
+
+    saveGenerated(shanghaiDate(), "今天的学习：利率是借钱的价格。");
+    const saved = await postAt("日报", "event-daily-saved");
+    expect(saved.bodies.at(-1)?.content).toBe("今天的学习：利率是借钱的价格。");
+    expect(saved.logs.join("\n")).not.toContain("api.deepseek.com");
+  });
+
   it("sends a short failure hint when the model call fails and does not mark a QQ error as sent", async () => {
     useSecret();
-    process.env.OPENAI_API_KEY = "sk-test-key-value12";
-    process.env.OPENAI_MODEL = "test-model";
-    createReply.mockRejectedValue(new Error("timeout"));
+    process.env.DEEPSEEK_API_KEY = "sk-deepseek-test-value";
+    process.env.DEEPSEEK_MODEL = "deepseek-flash";
     const logs: string[] = [];
     const errors: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
@@ -315,6 +335,7 @@ describe("qq webhook", () => {
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.includes("api.deepseek.com")) throw new Error("timeout");
       if (url.includes("getAppAccessToken")) {
         return Response.json({ access_token: "test-token", expires_in: 7200 });
       }
@@ -341,9 +362,11 @@ describe("qq webhook", () => {
     const combined = `${logs.join("\n")}\n${errors.join("\n")}`;
     expect(combined).toContain('"model":"failed"');
     expect(combined).toContain('"result":"sent"');
-    expect(combined).not.toContain("sk-test-key-value12");
+    expect(combined).not.toContain("sk-deepseek-test-value");
     expect(combined).not.toContain("解释一下市盈率");
 
+    delete process.env.DEEPSEEK_API_KEY;
+    delete process.env.DEEPSEEK_MODEL;
     const failed = await postAt("再问一次", "event-send-fail");
     const failedLogs = failed.logs.join("\n");
     expect(failedLogs).toContain('"result":"failed"');

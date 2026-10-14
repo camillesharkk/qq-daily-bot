@@ -1,22 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { answerQuestion } from "@/lib/qa";
 
-const { createReply } = vi.hoisted(() => ({ createReply: vi.fn() }));
-
-vi.mock("openai", () => ({
-  default: class {
-    responses = { create: createReply };
-    constructor(_options: unknown) {}
-  },
-}));
-
-const ENV_KEYS = ["OPENAI_API_KEY", "OPENAI_MODEL"] as const;
+const ENV_KEYS = ["DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"] as const;
 
 describe("answerQuestion", () => {
+  const originalFetch = globalThis.fetch;
   const saved = new Map<string, string | undefined>();
 
   afterEach(() => {
-    createReply.mockReset();
+    globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
     for (const key of ENV_KEYS) {
       const value = saved.get(key);
@@ -28,21 +20,20 @@ describe("answerQuestion", () => {
 
   function useModel(): void {
     for (const key of ENV_KEYS) saved.set(key, process.env[key]);
-    process.env.OPENAI_API_KEY = "sk-test-key-value12";
-    process.env.OPENAI_MODEL = "test-model";
+    process.env.DEEPSEEK_API_KEY = "sk-deepseek-test-value";
+    process.env.DEEPSEEK_MODEL = "deepseek-flash";
   }
 
   it("says the assistant is not configured when the model env is missing", async () => {
     for (const key of ENV_KEYS) saved.set(key, process.env[key]);
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.OPENAI_MODEL;
+    delete process.env.DEEPSEEK_API_KEY;
+    delete process.env.DEEPSEEK_MODEL;
     const answer = await answerQuestion("什么是利率");
     expect(answer).toEqual({
       text: "已收到你的问题，智能问答尚未配置完成。",
       model: "unconfigured",
       liveData: false,
     });
-    expect(createReply).not.toHaveBeenCalled();
   });
 
   it("returns a short failure and does not log the api key when the model call fails", async () => {
@@ -51,43 +42,38 @@ describe("answerQuestion", () => {
     vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
       errors.push(args.map(String).join(" "));
     });
-    createReply.mockRejectedValue(new Error("timeout"));
+    globalThis.fetch = (async () => {
+      throw new Error("timeout");
+    }) as typeof fetch;
     const answer = await answerQuestion("解释市盈率");
     expect(answer.model).toBe("failed");
     expect(answer.text).toBe("这次没能完成回答，请稍后再试。");
     expect(errors.join("\n")).toContain('"model":"failed"');
-    expect(errors.join("\n")).not.toContain("sk-test-key-value12");
+    expect(errors.join("\n")).not.toContain("sk-deepseek-test-value");
     expect(errors.join("\n")).not.toContain("解释市盈率");
   });
 
-  it("does not claim live market data unless web search returned sources", async () => {
+  it("does not claim live market data and can include today's report as context", async () => {
     useModel();
-    createReply.mockResolvedValueOnce({
-      output_text: "今天市场波动较大。",
-      output: [{ type: "web_search_call", status: "completed", action: { type: "search", sources: [] } }],
-    });
-    const withoutSources = await answerQuestion("今天的股市行情");
-    expect(withoutSources.liveData).toBe(false);
-    expect(withoutSources.text.startsWith("本次没有获取到实时资料")).toBe(true);
-    expect(createReply).toHaveBeenCalledWith(expect.objectContaining({ tools: [{ type: "web_search" }] }));
+    const bodies: string[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return Response.json({
+        choices: [{ message: { content: "物价持续上涨可以理解为钱更不值钱。" } }],
+      });
+    }) as typeof fetch;
 
-    createReply.mockResolvedValueOnce({
-      output_text: "来源名称：示例通讯社。",
-      output: [
-        {
-          type: "web_search_call",
-          status: "completed",
-          action: { type: "search", sources: [{ type: "url", url: "https://example.com/news" }] },
-        },
-      ],
-    });
-    const withSources = await answerQuestion("最新财经新闻");
-    expect(withSources.liveData).toBe(true);
-    expect(withSources.text).toBe("来源名称：示例通讯社。");
-    expect(withSources.text).not.toContain("https://");
+    const live = await answerQuestion("今天的股市行情");
+    expect(live.liveData).toBe(false);
+    expect(live.text.startsWith("本次没有获取到实时资料")).toBe(true);
+    expect(live.text).not.toContain("https://");
+    expect(bodies[0]).toContain("deepseek-flash");
+    expect(bodies[0]).not.toContain("web_search");
 
-    createReply.mockResolvedValueOnce({ output_text: "通胀是物价持续上涨。", output: [] });
-    await answerQuestion("什么是通货膨胀");
-    expect(createReply).toHaveBeenLastCalledWith(expect.not.objectContaining({ tools: expect.anything() }));
+    const follow = await answerQuestion("日报里提到了什么", "今日学习：利率是借钱的价格。");
+    expect(follow.liveData).toBe(false);
+    expect(follow.text).toContain("钱更不值钱");
+    expect(bodies[1]).toContain("今日学习：利率是借钱的价格。");
+    expect(bodies[1]).not.toContain("sk-deepseek-test-value");
   });
 });

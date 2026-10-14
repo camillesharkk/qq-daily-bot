@@ -1,4 +1,5 @@
 import { isBearerAuthorized } from "@/lib/auth";
+import { markSent, readDaily, saveGenerated } from "@/lib/daily-store";
 import { shanghaiDate } from "@/lib/date";
 import { optionalEnv } from "@/lib/env";
 import { safeLogMessage } from "@/lib/redact";
@@ -22,12 +23,33 @@ export async function GET(request: Request): Promise<Response> {
     );
   }
 
+  const date = shanghaiDate();
+  const existing = readDaily(date);
+  if (existing?.sent) {
+    console.log(JSON.stringify({ event: "daily_cron", date, generate: "skipped", send: "skipped" }));
+    return Response.json({ ok: true, segments: 0, date, status: "already_sent" });
+  }
+
+  let generate: "created" | "reused" = existing ? "reused" : "created";
+  let report = existing?.content;
+  if (!report) {
+    try {
+      report = await buildDailyReport();
+      saveGenerated(date, report);
+      generate = "created";
+    } catch (error) {
+      console.error(JSON.stringify({ event: "daily_cron", date, generate: "failed", send: "skipped", message: safeLogMessage(error) }));
+      return Response.json({ error: "Failed to generate or send the daily report" }, { status: 500 });
+    }
+  }
+
   try {
-    const report = await buildDailyReport();
     const segments = await sendGroupText(groupOpenId, report);
-    return Response.json({ ok: true, segments, date: shanghaiDate() });
+    markSent(date);
+    console.log(JSON.stringify({ event: "daily_cron", date, generate, send: "sent", segments }));
+    return Response.json({ ok: true, segments, date, status: "sent" });
   } catch (error) {
-    console.error(JSON.stringify({ event: "daily_cron_failed", message: safeLogMessage(error) }));
+    console.error(JSON.stringify({ event: "daily_cron", date, generate, send: "failed", message: safeLogMessage(error) }));
     return Response.json({ error: "Failed to generate or send the daily report" }, { status: 500 });
   }
 }

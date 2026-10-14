@@ -1,11 +1,14 @@
+import { readDaily } from "@/lib/daily-store";
+import { shanghaiDate } from "@/lib/date";
 import { finishReply, hasReply } from "@/lib/dedup";
 import { requireEnv } from "@/lib/env";
 import { isRecord } from "@/lib/guard";
-import { answerQuestion } from "@/lib/qa";
+import { allowQuestion } from "@/lib/limit";
+import { answerQuestion, QA_BUSY } from "@/lib/qa";
 import { QqSendError, sendGroupText } from "@/lib/qq/send";
 import { signValidation, verifyEventSignature } from "@/lib/qq/signature";
 import { safeLogMessage } from "@/lib/redact";
-import { planReply } from "@/lib/reply";
+import { DAILY_MISSING, planReply } from "@/lib/reply";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -94,14 +97,24 @@ async function handleGroupEvent(payload: Record<string, unknown>): Promise<void>
 
   const content = typeof data.content === "string" ? data.content : "";
   const plan = planReply(content);
-  let text = plan.branch === "reply_qa" ? "" : plan.text;
-  let model: "skipped" | "unconfigured" | "ok" | "failed" = "skipped";
+  let text = "";
+  let model: "skipped" | "unconfigured" | "ok" | "failed" | "limited" = "skipped";
   let liveData = 0;
-  if (plan.branch === "reply_qa") {
-    const answer = await answerQuestion(content);
-    text = answer.text;
-    model = answer.model;
-    liveData = answer.liveData ? 1 : 0;
+  if (plan.branch === "reply_daily") {
+    text = readDaily(shanghaiDate())?.content ?? DAILY_MISSING;
+  } else if (plan.branch === "reply_qa") {
+    if (!allowQuestion(groupOpenId)) {
+      text = QA_BUSY;
+      model = "limited";
+    } else {
+      const report = plan.useReport ? readDaily(shanghaiDate())?.content : undefined;
+      const answer = await answerQuestion(content, report);
+      text = answer.text;
+      model = answer.model;
+      liveData = answer.liveData ? 1 : 0;
+    }
+  } else {
+    text = plan.text;
   }
 
   try {

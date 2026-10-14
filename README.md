@@ -78,7 +78,7 @@ https://<vercel-domain>/api/qq/webhook
 ## 绑定 QQ 群
 
 1. 把机器人拉进目标群。
-2. 在群里 @机器人，发送 `绑定日报`。也可以发送包含“测试”的消息。
+2. 在群里 @机器人，发送 `绑定日报`。也可以发送包含“测试”的消息。只发送 `日报` 会读取当天已经生成的报告，不会重新生成。
 3. 机器人会回复：`机器人连接成功，已识别当前群聊。`
 4. 打开 Vercel 项目的 Logs，搜索：
 
@@ -140,7 +140,11 @@ Invoke-RestMethod -Uri "https://<vercel-domain>/api/health"
 
 三个来源都没有可用内容时，定时任务返回服务器错误，不会发送空消息。
 
-QQ 群可能拦截未报备的网址。发送前会去掉 `http://` 和 `https://` 链接，只保留来源名称。
+群里除固定命令外的提问走 DeepSeek，不替换上面的 OpenAI 日报。需要同时配置 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_MODEL`。当前官方文档列出的模型名是 `deepseek-flash` 和 `deepseek-v4-pro`，项目不会替你选择。
+
+定时任务按 `0 1 * * *` 运行，也就是北京时间 09:00。它会主动发到 `QQ_GROUP_OPENID`，因此需要该变量，以及 QQ 侧允许主动发群。群里只发送“日报”时，读取当天已经生成的内容，不会再调用 OpenAI。
+
+QQ 群可能拦截未报备的网址。发送前会去掉 `http://` 和 `https://` 链接，只保留来源名称。保存的日报正文仍可带链接，供再次阅读和追问引用。
 
 ## 每天什么时候发送
 
@@ -180,6 +184,8 @@ CRON_SECRET=
 ADMIN_TOKEN=
 OPENAI_API_KEY=
 OPENAI_MODEL=
+DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=
 DAILY_MESSAGE=
 REPORT_SOURCE_URL=
 REPORT_SOURCE_TOKEN=
@@ -189,7 +195,7 @@ REPORT_SOURCE_TOKEN=
 
 ## 安全提醒
 
-- AppSecret、OpenAI API Key、Access Token、Cron Secret、Admin Token 永远不要提交到 GitHub，也不要截图发给别人。
+- AppSecret、OpenAI API Key、DeepSeek API Key、Access Token、Cron Secret、Admin Token 永远不要提交到 GitHub，也不要截图发给别人。
 - 开发阶段使用 `https://sandbox.api.sgroup.qq.com`。
 - 机器人通过 QQ 正式审核并上线后，再把 `QQ_API_BASE` 改为 `https://api.sgroup.qq.com` 并重新部署。
 - Access Token 获取地址是 `https://bots.qq.com/app/getAppAccessToken`。Token 只放在内存里，提前 60 秒视为过期，日志中不会输出 Token。
