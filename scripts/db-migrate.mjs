@@ -8,14 +8,13 @@ if (!url) {
 }
 
 const sql = neon(url);
-const file = readFileSync(new URL("../db/migrations/001_daily_reports.sql", import.meta.url), "utf8");
-const statements = file
-  .split(";")
-  .map((statement) => statement.trim())
-  .filter(Boolean);
-
-for (const statement of statements) {
-  await sql.query(statement);
+const files = ["001_daily_reports.sql", "002_report_attempts.sql"];
+for (const name of files) {
+  const file = readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8");
+  const statements = file
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  for (const statement of statements) await sql.query(statement);
+  console.log(`applied db/migrations/${name}`);
 }
-
-console.log("applied db/migrations/001_daily_reports.sql");

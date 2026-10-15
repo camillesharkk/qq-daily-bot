@@ -1,4 +1,4 @@
-import { readReadyReport } from "@/lib/daily-store";
+import { readDailyStatus, readReadyReport } from "@/lib/daily-store";
 import { DailyStoreError } from "@/lib/db";
 import { shanghaiDate } from "@/lib/date";
 import { finishReply, hasReply } from "@/lib/dedup";
@@ -9,7 +9,7 @@ import { answerQuestion, QA_BUSY } from "@/lib/qa";
 import { QqSendError, sendGroupText } from "@/lib/qq/send";
 import { signValidation, verifyEventSignature } from "@/lib/qq/signature";
 import { safeLogMessage } from "@/lib/redact";
-import { DAILY_MISSING, planReply } from "@/lib/reply";
+import { DAILY_FAILED, DAILY_MISSING, DAILY_PENDING, planReply } from "@/lib/reply";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -113,8 +113,19 @@ async function handleGroupEvent(payload: Record<string, unknown>): Promise<void>
   let model: "skipped" | "unconfigured" | "ok" | "failed" | "limited" = "skipped";
   let liveData = 0;
   if (plan.branch === "reply_daily") {
-    const saved = await savedReport(shanghaiDate());
-    text = saved === "unavailable" ? DAILY_STORE_UNAVAILABLE : saved ?? DAILY_MISSING;
+    try {
+      const saved = await readDailyStatus(shanghaiDate());
+      text = saved === "missing"
+        ? DAILY_MISSING
+        : saved === "failed"
+          ? DAILY_FAILED
+          : saved === "generating"
+            ? DAILY_PENDING
+            : saved.content;
+    } catch (error) {
+      if (!(error instanceof DailyStoreError)) throw error;
+      text = DAILY_STORE_UNAVAILABLE;
+    }
   } else if (plan.branch === "reply_qa") {
     if (!allowQuestion(groupOpenId)) {
       text = QA_BUSY;

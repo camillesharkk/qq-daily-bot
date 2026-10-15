@@ -241,7 +241,14 @@ async function answerChat(apiKey: string, model: string, question: string, repor
   return { text, model: "ok", liveData: false };
 }
 
-async function postMessages(apiKey: string, model: string, system: string, messages: unknown[]): Promise<unknown> {
+async function postMessages(
+  apiKey: string,
+  model: string,
+  system: string,
+  messages: unknown[],
+  maxTokens = QA_MAX_TOKENS,
+  timeoutMs = SEARCH_TIMEOUT_MS,
+): Promise<unknown> {
   const response = await fetch(DEEPSEEK_SEARCH_URL, {
     method: "POST",
     cache: "no-store",
@@ -252,40 +259,54 @@ async function postMessages(apiKey: string, model: string, system: string, messa
     },
     body: JSON.stringify({
       model,
-      max_tokens: QA_MAX_TOKENS,
+      max_tokens: maxTokens,
       system,
       messages,
       tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
       thinking: { type: "disabled" },
     }),
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) throw new Error(`DeepSeek search failed: HTTP ${response.status}`);
   return response.json();
 }
 
-async function answerWithSearch(
-  apiKey: string,
-  model: string,
-  question: string,
-  report: string | undefined,
-  requestId: string,
-): Promise<QaAnswer> {
-  const system = systemPrompt(report, true);
-  let messages: unknown[] = [{ role: "user", content: question }];
+export type WebSearchResult = {
+  text: string;
+  validSources: number;
+  hosts: string[];
+  complete: boolean;
+};
+
+export async function runWebSearch(input: {
+  apiKey: string;
+  model: string;
+  system: string;
+  user: string;
+  requestId: string;
+  maxTokens?: number;
+  timeoutMs?: number;
+  rounds?: number;
+}): Promise<WebSearchResult> {
+  const rounds = input.rounds ?? SEARCH_ROUNDS;
+  let messages: unknown[] = [{ role: "user", content: input.user }];
   let text = "";
   let validSources = 0;
+  const hosts: string[] = [];
   let stop: string | null = null;
-  for (let round = 0; round < SEARCH_ROUNDS; round += 1) {
-    const parsed = await postMessages(apiKey, model, system, messages);
+  for (let round = 0; round < rounds; round += 1) {
+    const parsed = await postMessages(input.apiKey, input.model, input.system, messages, input.maxTokens, input.timeoutMs);
     stop = stopReason(parsed);
     const answer = readSearchAnswer(parsed);
     validSources = Math.max(validSources, answer.validSources);
+    for (const host of answer.hosts) {
+      if (!hosts.includes(host)) hosts.push(host);
+    }
     text = mergeText(text, answer.text);
-    logQa(requestId, "messages", stop, Array.from(text).length, round);
+    logQa(input.requestId, "messages", stop, Array.from(text).length, round);
     console.log(JSON.stringify({
       event: "qa_search",
-      request_id: requestId,
+      request_id: input.requestId,
       executed: answer.executed ? 1 : 0,
       valid_sources: answer.validSources,
       errors: answer.errors,
@@ -296,10 +317,24 @@ async function answerWithSearch(
     const clientTool = blocks.some((block) => isRecord(block) && block.type === "tool_use");
     const paused = stop === "pause_turn" || stop === "max_tokens" || clientTool;
     if (!paused && !looksCut(stripProcess(text) || text)) break;
-    if (round === SEARCH_ROUNDS - 1 || blocks.length === 0 || clientTool) break;
+    if (round === rounds - 1 || blocks.length === 0 || clientTool) break;
     messages = [...messages, { role: "assistant", content: blocks }];
   }
   const conclusion = stripProcess(text);
+  return { text: conclusion, validSources, hosts, complete: Boolean(conclusion) && !looksCut(conclusion) };
+}
+
+async function answerWithSearch(
+  apiKey: string,
+  model: string,
+  question: string,
+  report: string | undefined,
+  requestId: string,
+): Promise<QaAnswer> {
+  const system = systemPrompt(report, true);
+  const searched = await runWebSearch({ apiKey, model, system, user: question, requestId });
+  const conclusion = searched.text;
+  const validSources = searched.validSources;
   if (!conclusion) return { text: SEARCH_FAILED, model: "ok", liveData: false };
   if (validSources === 0) {
     return { text: `${LIVE_DISCLAIMER}\n${looksCut(conclusion) ? `${conclusion}\n${INCOMPLETE_NOTE}` : conclusion}`, model: "ok", liveData: false };

@@ -1,5 +1,5 @@
 import { isBearerAuthorized } from "@/lib/auth";
-import { readReadyReport, readSendState, saveReport } from "@/lib/daily-store";
+import { readReadyReport, readSendRecord, readSendState, saveReport } from "@/lib/daily-store";
 import { DailyStoreError } from "@/lib/db";
 import { optionalEnv } from "@/lib/env";
 import { isRecord } from "@/lib/guard";
@@ -40,13 +40,15 @@ export async function POST(request: Request): Promise<Response> {
     try {
       const content = await readReadyReport(date);
       const group = optionalEnv("QQ_GROUP_OPENID");
-      const sendState = group ? await readSendState(date, group) : null;
+      const record = group ? await readSendRecord(date, group) : null;
+      const sendState = record?.state ?? null;
       return Response.json({
         ok: true,
         action,
         date,
         content,
         sendState,
+        delivery: record?.state === "sent" && !record.receipts ? "unverified" : null,
         bound: Boolean(group),
         segments: content ? prepareQqMessages(content) : [],
         message: content ? "已读取保存的原文。" : "这一天还没有保存日报。",

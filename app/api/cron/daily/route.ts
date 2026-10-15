@@ -1,5 +1,5 @@
 import { isBearerAuthorized } from "@/lib/auth";
-import { shanghaiDate } from "@/lib/date";
+import { inSendWindow, shanghaiDate } from "@/lib/date";
 import { readReadyReport } from "@/lib/daily-store";
 import { DailyStoreError } from "@/lib/db";
 import { optionalEnv } from "@/lib/env";
@@ -18,6 +18,7 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const content = await readReadyReport(date);
     if (!content) return Response.json({ ok: true, status: "missing", date });
+    if (!inSendWindow()) return Response.json({ ok: true, status: "outside_window", date });
     const result = await publishDailyReport(date, content);
     console.log(JSON.stringify({
       event: "daily_cron",

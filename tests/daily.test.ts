@@ -17,22 +17,25 @@ describe("daily commands and schedule", () => {
     expect(planReply("什么是通货膨胀")).toEqual({ branch: "reply_qa", useReport: false });
   });
 
-  it("pushes the saved report at 09:00 Beijing and keeps unverified holding labels", () => {
-    const config = JSON.parse(readFileSync("vercel.json", "utf8")) as { crons: unknown[] };
-    expect(config.crons).toEqual([{ path: "/api/cron/daily", schedule: "0 1 * * *" }]);
+  it("generates before the 09:00 Beijing send window and lists checked tickers without amounts", () => {
+    const config = JSON.parse(readFileSync("vercel.json", "utf8")) as { crons: Array<{ path: string; schedule: string }> };
+    expect(config.crons).toEqual([
+      { path: "/api/cron/generate", schedule: "0 23 * * *" },
+      { path: "/api/cron/daily", schedule: "0 1 * * *" },
+    ]);
     expect(shanghaiDate(new Date("2026-10-13T16:00:00Z"))).toBe("2026-10-14");
     expect(shanghaiDate(new Date("2026-10-13T15:59:00Z"))).toBe("2026-10-13");
-    expect(HOLDINGS.reduce((sum, item) => sum + item.weightPercent, 0)).toBe(100);
-    expect(HOLDINGS.every((item) => item.status === "未核实")).toBe(true);
-    const instructions = reportInstructions("2026-10-14");
-    expect(instructions).toContain("纳斯达克100指数");
-    expect(instructions).toContain("暂按纳斯达克综合指数");
-    expect(instructions).toContain("澳元兑美元");
-    expect(instructions).toContain("无重要新增");
-    expect(instructions).toContain("检索失败");
+    expect(planReply("今日日报").branch).toBe("reply_daily");
+    expect(HOLDINGS.filter((item) => item.analyze).map((item) => item.symbol)).toEqual(["NDQ", "VAP", "QQQ", "MSFT", "NVDA", "TSLA", "SMH", "XOM"]);
+    expect(HOLDINGS.find((item) => item.symbol === "SPCX")?.analyze).toBe(false);
+    const instructions = reportInstructions("2026-10-16");
+    expect(instructions).toContain("QQQ");
+    expect(instructions).toContain("NVDA");
     expect(instructions).toContain(MAPPING_NOTE);
-    expect(instructions).not.toContain("QQQ");
-    expect(instructions).not.toContain("NVDA");
+    expect(instructions).not.toContain("1000");
+    expect(instructions).not.toContain("1,000");
+    expect(instructions).not.toContain("20%");
+    expect(JSON.stringify(HOLDINGS)).not.toContain("1000");
   });
 
   it("limits repeated questions for one group", () => {

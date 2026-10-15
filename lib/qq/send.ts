@@ -22,11 +22,15 @@ export class QqSendError extends Error {
   }
 }
 
+export type QqReceipt = { index: number; id: string; time: string };
+
 export type SendGroupTextOptions = {
   msgId?: string;
   msgSeq?: number;
   gapMs?: number;
   requestId?: string;
+  startIndex?: number;
+  receipts?: QqReceipt[];
 };
 
 const DUPLICATE_ERR_CODE = "40054005";
@@ -85,7 +89,7 @@ async function deliver(
   msgSeq: number,
   msgId: string | undefined,
   allowRetry: boolean,
-): Promise<void> {
+): Promise<{ id: string; time: string }> {
   const token = await getAccessToken();
   const appId = requireEnv("QQ_APP_ID");
   const url = `${qqApiBase()}/v2/groups/${encodeURIComponent(groupOpenId)}/messages`;
@@ -117,17 +121,31 @@ async function deliver(
     const raw = await response.text();
     logQqFailure(response.status, raw, response.headers);
     clearAccessTokenCache();
-    await deliver(groupOpenId, content, msgSeq, msgId, false);
-    return;
+    return deliver(groupOpenId, content, msgSeq, msgId, false);
   }
 
+  const raw = await response.text();
   if (!response.ok) {
-    const raw = await response.text();
     const errCode = logQqFailure(response.status, raw, response.headers);
     throw new QqSendError(response.status, errCode);
   }
-
-  console.log(JSON.stringify({ event: "qq_send_ok", status: response.status, msg_seq: msgSeq }));
+  let id = "";
+  let time = "";
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (isRecord(parsed)) {
+      if (typeof parsed.id === "string") id = parsed.id;
+      if (typeof parsed.timestamp === "string") time = parsed.timestamp;
+    }
+  } catch {
+    id = "";
+  }
+  if (!id) {
+    console.error(JSON.stringify({ event: "qq_send_failed", status: response.status, err_code: "missing_id", msg_seq: msgSeq }));
+    throw new QqSendError(response.status, "missing_id");
+  }
+  console.log(JSON.stringify({ event: "qq_send_ok", status: response.status, msg_seq: msgSeq, message_id: id }));
+  return { id, time };
 }
 
 function logSegment(
@@ -170,7 +188,7 @@ export async function sendGroupText(
 
   const key = options?.msgId ? progressKey(options.msgId, segments) : "";
   const gap = options?.gapMs ?? GAP_MS;
-  let index = key ? progress.get(key) ?? 0 : 0;
+  let index = options?.startIndex ?? (key ? progress.get(key) ?? 0 : 0);
   let duplicates = 0;
   const seqBase = options?.msgSeq ?? 1;
   while (index < segments.length) {
@@ -182,7 +200,8 @@ export async function sendGroupText(
     if (index > 0 && gap > 0) await delay(gap);
     const msgSeq = seqBase + index;
     try {
-      await deliver(groupOpenId, segment, msgSeq, options?.msgId, true);
+      const receipt = await deliver(groupOpenId, segment, msgSeq, options?.msgId, true);
+      options?.receipts?.push({ index: index + 1, id: receipt.id, time: receipt.time });
       logSegment(requestId, index + 1, segments.length, msgSeq, 200, null);
     } catch (error) {
       const status = error instanceof QqSendError ? error.status : 0;
