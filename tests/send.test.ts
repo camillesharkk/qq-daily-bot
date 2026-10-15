@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAccessTokenCache } from "@/lib/qq/token";
-import { sendGroupText } from "@/lib/qq/send";
+import { resetSendProgress, sendGroupText, QqSendError } from "@/lib/qq/send";
 
 const ENV_KEYS = ["QQ_APP_ID", "QQ_APP_SECRET", "QQ_API_BASE"] as const;
 
@@ -18,6 +18,7 @@ describe("sendGroupText", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     clearAccessTokenCache();
+    resetSendProgress();
     for (const key of ENV_KEYS) {
       const value = saved.get(key);
       if (value === undefined) delete process.env[key];
@@ -107,6 +108,28 @@ describe("sendGroupText", () => {
     expect(bodies.every((body) => body.msg_id === "msg-from-event")).toBe(true);
     expect(bodies.map((body) => body.msg_seq)).toEqual(bodies.map((_, index) => index + 1));
     expect(bodies.every((body) => String(body.content).trim().length > 0)).toBe(true);
+  });
+
+  it("retries only the segments that have not succeeded", async () => {
+    useFakeCredentials();
+    const bodies: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("getAppAccessToken")) return Response.json({ access_token: "test-token", expires_in: 7200 });
+      calls += 1;
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (calls === 2) return Response.json({ err_code: 50001, message: "failed" }, { status: 500 });
+      return Response.json({ id: "msg-3" });
+    }) as typeof fetch;
+
+    const content = `${"甲".repeat(1500)}\n${"乙".repeat(100)}`;
+    await expect(sendGroupText("group-1", content, { msgId: "msg-retry", gapMs: 0, requestId: "req-1" })).rejects.toBeInstanceOf(QqSendError);
+    const firstCount = bodies.length;
+    await sendGroupText("group-1", content, { msgId: "msg-retry", gapMs: 0, requestId: "req-1" });
+    expect(bodies.slice(firstCount).map((body) => body.msg_seq)).toEqual([2]);
+    expect(bodies.slice(firstCount).every((body) => body.msg_id === "msg-retry")).toBe(true);
+    expect(String(bodies[0]?.content)).not.toBe(String(bodies[firstCount]?.content));
   });
 
   it("refuses to send empty content", async () => {

@@ -63,12 +63,14 @@ describe("http routes", () => {
     expect(JSON.stringify(body)).not.toContain("group-secret");
   });
 
-  it("keeps the server daily cron paused and does not call a model or QQ", async () => {
+  it("does not generate a report or call QQ when nothing is saved", async () => {
     saveEnv();
     process.env.CRON_SECRET = "test-cron-secret";
     process.env.OPENAI_API_KEY = "sk-test";
     process.env.OPENAI_MODEL = "gpt-test";
     process.env.DAILY_MESSAGE = "must-not-send";
+    const previousDatabase = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
     let calls = 0;
     globalThis.fetch = (() => {
       calls += 1;
@@ -77,17 +79,20 @@ describe("http routes", () => {
 
     const denied = await cron(new Request("https://example.com/api/cron/daily"));
     expect(denied.status).toBe(401);
-    const paused = await cron(
+    const missing = await cron(
       new Request("https://example.com/api/cron/daily", {
         headers: { authorization: "Bearer test-cron-secret" },
       }),
     );
-    const body: unknown = await paused.json();
-    expect(paused.status).toBe(200);
-    expect(body).toEqual({ ok: true, status: "paused" });
+    const body: unknown = await missing.json();
+    expect(missing.status).toBe(200);
+    expect(body).toMatchObject({ ok: false, status: "unavailable" });
     expect(calls).toBe(0);
     expect(JSON.stringify(body)).not.toContain("test-cron-secret");
     expect(JSON.stringify(body)).not.toContain("must-not-send");
+    expect(JSON.stringify(body)).not.toContain("sk-test");
+    if (previousDatabase === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabase;
   });
 
   it("sends the admin test message only to the server group", async () => {

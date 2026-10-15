@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { qqApiBase, requireEnv } from "@/lib/env";
 import { isRecord } from "@/lib/guard";
 import { safeLogMessage } from "@/lib/redact";
@@ -10,12 +11,14 @@ const TIMEOUT_MS = 15_000;
 export class QqSendError extends Error {
   readonly status: number;
   readonly errCode: string | number | null;
+  readonly sent: number;
 
-  constructor(status: number, errCode: string | number | null) {
+  constructor(status: number, errCode: string | number | null, sent = 0) {
     super(`QQ message send failed: HTTP ${status}`);
     this.name = "QqSendError";
     this.status = status;
     this.errCode = errCode;
+    this.sent = sent;
   }
 }
 
@@ -23,7 +26,20 @@ export type SendGroupTextOptions = {
   msgId?: string;
   msgSeq?: number;
   gapMs?: number;
+  requestId?: string;
 };
+
+const DUPLICATE_ERR_CODE = "40054005";
+const progress = new Map<string, number>();
+
+export function resetSendProgress(): void {
+  progress.clear();
+}
+
+function progressKey(msgId: string, segments: string[]): string {
+  const digest = createHash("sha256").update(segments.join("\u0000")).digest("hex").slice(0, 12);
+  return `${msgId}:${digest}`;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -114,6 +130,25 @@ async function deliver(
   console.log(JSON.stringify({ event: "qq_send_ok", status: response.status, msg_seq: msgSeq }));
 }
 
+function logSegment(
+  requestId: string | undefined,
+  index: number,
+  total: number,
+  msgSeq: number,
+  status: number,
+  errCode: string | number | null,
+): void {
+  console.log(JSON.stringify({
+    event: "qq_segment",
+    request_id: requestId ?? null,
+    index,
+    total,
+    msg_seq: msgSeq,
+    status,
+    err_code: errCode,
+  }));
+}
+
 export async function sendGroupText(
   groupOpenId: string,
   content: string,
@@ -123,17 +158,49 @@ export async function sendGroupText(
   if (segments.length === 0) {
     throw new Error("Refusing to send empty QQ message");
   }
+  const requestId = options?.requestId;
+  const formattedChars = segments.reduce((sum, segment) => sum + Array.from(segment).length, 0);
+  console.log(JSON.stringify({
+    event: "qq_outbound",
+    request_id: requestId ?? null,
+    chars: Array.from(content).length,
+    formatted_chars: formattedChars,
+    segments: segments.length,
+  }));
 
+  const key = options?.msgId ? progressKey(options.msgId, segments) : "";
   const gap = options?.gapMs ?? GAP_MS;
-  let seq = options?.msgSeq ?? 1;
-  let sent = 0;
-  for (const segment of segments) {
-    if (!segment.trim()) continue;
-    if (sent > 0 && gap > 0) await delay(gap);
-    await deliver(groupOpenId, segment, seq, options?.msgId, true);
-    seq += 1;
-    sent += 1;
+  let index = key ? progress.get(key) ?? 0 : 0;
+  let duplicates = 0;
+  const seqBase = options?.msgSeq ?? 1;
+  while (index < segments.length) {
+    const segment = segments[index];
+    if (!segment?.trim()) {
+      index += 1;
+      continue;
+    }
+    if (index > 0 && gap > 0) await delay(gap);
+    const msgSeq = seqBase + index;
+    try {
+      await deliver(groupOpenId, segment, msgSeq, options?.msgId, true);
+      logSegment(requestId, index + 1, segments.length, msgSeq, 200, null);
+    } catch (error) {
+      const status = error instanceof QqSendError ? error.status : 0;
+      const errCode = error instanceof QqSendError ? error.errCode : null;
+      if (String(errCode) === DUPLICATE_ERR_CODE) {
+        duplicates += 1;
+        logSegment(requestId, index + 1, segments.length, msgSeq, status, errCode);
+      } else {
+        logSegment(requestId, index + 1, segments.length, msgSeq, status, errCode);
+        if (key) progress.set(key, index);
+        throw new QqSendError(status, errCode, index);
+      }
+    }
+    index += 1;
+    if (key) progress.set(key, index);
   }
-  if (sent === 0) throw new Error("Refusing to send empty QQ message");
-  return sent;
+  if (duplicates > 0 && duplicates === segments.length) {
+    throw new QqSendError(400, DUPLICATE_ERR_CODE, segments.length);
+  }
+  return segments.length;
 }

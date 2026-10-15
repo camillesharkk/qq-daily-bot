@@ -107,6 +107,7 @@ async function handleGroupEvent(payload: Record<string, unknown>): Promise<void>
   }
 
   const content = typeof data.content === "string" ? data.content : "";
+  const requestId = crypto.randomUUID().slice(0, 8);
   const plan = planReply(content);
   let text = "";
   let model: "skipped" | "unconfigured" | "ok" | "failed" | "limited" = "skipped";
@@ -123,7 +124,7 @@ async function handleGroupEvent(payload: Record<string, unknown>): Promise<void>
       if (saved === "unavailable") {
         text = DAILY_STORE_UNAVAILABLE;
       } else {
-        const answer = await answerQuestion(content, saved ?? undefined);
+        const answer = await answerQuestion(content, saved ?? undefined, requestId);
         text = answer.text;
         model = answer.model;
         liveData = answer.liveData ? 1 : 0;
@@ -134,20 +135,23 @@ async function handleGroupEvent(payload: Record<string, unknown>): Promise<void>
   }
 
   try {
-    const segments = await sendGroupText(groupOpenId, text, { msgId });
+    const segments = await sendGroupText(groupOpenId, text, { msgId, requestId });
     finishReply(msgId, true);
-    logWebhook(type, plan.branch, { result: "sent", segments, model, live_data: liveData });
+    logWebhook(type, plan.branch, { result: "sent", segments, model, live_data: liveData, request_id: requestId });
   } catch (error) {
     const status = error instanceof QqSendError ? error.status : null;
     const errCode = error instanceof QqSendError ? error.errCode : null;
+    const sent = error instanceof QqSendError ? error.sent : 0;
     const duplicate = String(errCode) === DUPLICATE_ERR_CODE;
     finishReply(msgId, duplicate);
     logWebhook(type, duplicate ? "duplicate" : plan.branch, {
       result: duplicate ? "duplicate" : "failed",
       status,
       err_code: errCode,
+      segments_sent: sent,
       model,
       live_data: liveData,
+      request_id: requestId,
     });
   }
 }

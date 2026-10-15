@@ -36,4 +36,13 @@ describe("qq text", () => {
       "不能联网，没有实时行情。\n标题\n• 第一条",
     ]);
   });
+
+  it("keeps every character when a long answer is split", () => {
+    const source = `${"甲".repeat(80)}。\n${"乙".repeat(40)}。`;
+    const parts = prepareQqMessages(source, 30);
+    const restored = parts.map((part) => part.replace(/^第 \d+\/\d+ 段\n/, "")).join("");
+    expect(parts.length).toBeGreaterThan(1);
+    expect(restored).toContain("甲".repeat(80));
+    expect(restored).toContain("乙".repeat(40));
+  });
 });
