@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitForQq, stripUrls } from "@/lib/text";
+import { prepareQqMessages, splitForQq, stripUrls } from "@/lib/text";
 
 describe("qq text", () => {
   it("does not emit empty segments and keeps each segment within the limit", () => {
@@ -29,5 +29,11 @@ describe("qq text", () => {
     expect(stripped).toContain("news.example.com");
     expect(stripped).toContain("财报");
     expect(stripped).toContain("ir.example.com");
+  });
+
+  it("sends group replies as plain text", () => {
+    expect(prepareQqMessages("**不能联网**，没有`实时行情`。\n# 标题\n- 第一条")).toEqual([
+      "不能联网，没有实时行情。\n标题\n• 第一条",
+    ]);
   });
 });

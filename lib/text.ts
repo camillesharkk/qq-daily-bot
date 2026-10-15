@@ -130,6 +130,17 @@ export function stripUrls(text: string): string {
   return withoutRaw.replace(/[ \t]{2,}/g, " ").trim();
 }
 
+export function toPlainText(text: string): string {
+  return text
+    .replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/__([^_\n]+)__/g, "$1")
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, "")
+    .replace(/\*\*/g, "")
+    .replace(/^[ \t]*[-*+][ \t]+/gm, "• ");
+}
+
 export function prepareQqMessages(content: string, limit = DEFAULT_SEGMENT_LIMIT): string[] {
-  return splitForQq(stripUrls(content), limit).filter((segment) => segment.trim().length > 0);
+  return splitForQq(stripUrls(toPlainText(content)), limit).filter((segment) => segment.trim().length > 0);
 }
